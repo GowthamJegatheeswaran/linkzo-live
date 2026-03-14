@@ -1,46 +1,40 @@
 /* ═══════════════════════════════════════════════════
    Linkzo Live · script.js
-   ─────────────────────────────────────────────────
-   Features:
-   · WebRTC with ICE candidate queuing
-   · Multiple STUN/TURN for cross-network calls
-   · Group chat (broadcast)
-   · Private / DM chat
-   · Mute / camera toggle with correct icon state
-   · Call duration timer
-   · Toast notifications for join/leave events
-   · Participant panel with live mic/cam status
+   Assignment: Video/Audio · Text Chat · Mute/Camera
+   Extra: Screen Share · Group Chat · Private DM
+          Call Timer · Participants Panel · Toast
+          Mobile-friendly panel
    ═══════════════════════════════════════════════════ */
 
-/* ── Socket ────────────────────────────────────────── */
-const socket = io({ transports: ["websocket", "polling"] });
-
-/* ── Room & identity ───────────────────────────────── */
+const socket   = io({ transports: ["websocket", "polling"] });
 const roomId   = decodeURIComponent(new URLSearchParams(window.location.search).get("room") || "");
 const username = localStorage.getItem("username") || "Guest";
 
 document.getElementById("room-display").textContent = roomId;
-document.getElementById("group-date-label").textContent = formatDate(new Date());
+document.getElementById("group-date-label").textContent = new Date().toLocaleDateString([],
+    { weekday:"long", month:"long", day:"numeric" });
 
-/* ── State ─────────────────────────────────────────── */
+/* ── State ── */
 let localStream       = null;
-let peers             = {};          // peerId → RTCPeerConnection
-let pendingCandidates = {};          // peerId → RTCIceCandidate[]
-let userNames         = {};          // peerId → displayName
-let muteState         = {};          // peerId → bool (isMuted)
-let camState          = {};          // peerId → bool (cameraOn)
+let screenStream      = null;
+let peers             = {};
+let pendingCandidates = {};
+let userNames         = {};
+let muteState         = {};
+let camState          = {};
 let participantCount  = 0;
 let isMuted           = false;
 let isCameraOn        = true;
+let isSharingScreen   = false;
 let callTimerInterval = null;
 let activeTab         = "participants";
-let activeDMId        = null;        // peerId of current DM partner
-let dmHistory         = {};          // peerId → [{...}]
+let activeDMId        = null;
+let dmHistory         = {};
 let groupUnread       = 0;
 let privateUnread     = 0;
-let panelVisible      = true;
+let panelOpen         = false;   // starts CLOSED — opens when user taps Chat/People
 
-/* ── ICE config (multiple STUN + TURN for cross-network) ── */
+/* ── ICE config ── */
 const RTC_CONFIG = {
     iceServers: [
         { urls: "stun:stun.l.google.com:19302"  },
@@ -58,23 +52,23 @@ const RTC_CONFIG = {
         }
     ],
     iceTransportPolicy: "all",
-    bundlePolicy:       "max-bundle",
-    rtcpMuxPolicy:      "require"
+    bundlePolicy: "max-bundle",
+    rtcpMuxPolicy: "require"
 };
 
-/* ════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════
    INIT
-   ════════════════════════════════════════════════════ */
+   ══════════════════════════════════════════════════ */
 async function init() {
     try {
         localStream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
-            audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 48000 }
+            video: { width:{ideal:1280}, height:{ideal:720}, facingMode:"user" },
+            audio: { echoCancellation:true, noiseSuppression:true, sampleRate:48000 }
         });
     } catch (_) {
         try {
-            localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        } catch (err) {
+            localStream = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
+        } catch(e) {
             showToast("Cannot access camera/microphone. Check permissions.", "error");
             return;
         }
@@ -82,26 +76,32 @@ async function init() {
 
     addVideoStream(localStream, "local", username);
     socket.emit("join-room", roomId, username);
+
+    /* Hide screen share button on mobile (not supported in most mobile browsers) */
+    if (!navigator.mediaDevices.getDisplayMedia) {
+        const ssItem = document.getElementById("screenShareItem");
+        if (ssItem) ssItem.style.display = "none";
+    }
+
     bindInputs();
+    renderParticipants();
 }
 
-/* ════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════
    SOCKET EVENTS
-   ════════════════════════════════════════════════════ */
+   ══════════════════════════════════════════════════ */
 
-/* Existing users when we join */
 socket.on("existing-users", (users) => {
     users.forEach(u => {
-        userNames[u.id]  = u.username;
-        muteState[u.id]  = u.isMuted;
-        camState[u.id]   = u.cameraOn;
+        userNames[u.id] = u.username;
+        muteState[u.id] = u.isMuted;
+        camState[u.id]  = u.cameraOn;
         if (socket.id < u.id) connectToUser(u.id);
     });
     renderParticipants();
     refreshDMList();
 });
 
-/* New user joins */
 socket.on("user-connected", (userId, name) => {
     userNames[userId] = name;
     if (socket.id < userId) connectToUser(userId);
@@ -110,7 +110,6 @@ socket.on("user-connected", (userId, name) => {
     refreshDMList();
 });
 
-/* WebRTC offer */
 socket.on("offer", async (offer, senderId, senderName) => {
     userNames[senderId] = senderName;
     let peer = peers[senderId] || createPeer(senderId);
@@ -120,24 +119,18 @@ socket.on("offer", async (offer, senderId, senderName) => {
         const answer = await peer.createAnswer();
         await peer.setLocalDescription(answer);
         socket.emit("answer", answer, senderId);
-    } catch (e) {
-        console.warn("[offer]", e);
-    }
+    } catch(e) { console.warn("[offer]", e); }
 });
 
-/* WebRTC answer */
 socket.on("answer", async (answer, senderId) => {
     const peer = peers[senderId];
     if (!peer || peer.signalingState !== "have-local-offer") return;
     try {
         await peer.setRemoteDescription(new RTCSessionDescription(answer));
         flushCandidates(senderId);
-    } catch (e) {
-        console.warn("[answer]", e);
-    }
+    } catch(e) { console.warn("[answer]", e); }
 });
 
-/* ICE candidate */
 socket.on("ice-candidate", (candidate, senderId) => {
     const peer = peers[senderId];
     if (peer?.remoteDescription?.type) {
@@ -148,41 +141,35 @@ socket.on("ice-candidate", (candidate, senderId) => {
     }
 });
 
-/* User leaves */
 socket.on("user-disconnected", (userId) => {
     const name = userNames[userId] || "A participant";
-    closePeerConnection(userId);
+    closePeer(userId);
     showToast(`${name} left the meeting`, "leave");
     renderParticipants();
     refreshDMList();
     if (activeDMId === userId) closeDM();
 });
 
-/* Participant count */
 socket.on("participant-count", (count) => {
     participantCount = count;
     document.getElementById("participant-count").textContent = count;
-    document.getElementById("pane-count").textContent = count;
+    document.getElementById("pane-count").textContent        = count;
 });
 
-/* Call timer sync */
 socket.on("call-started", (startTime) => {
     if (callTimerInterval) clearInterval(callTimerInterval);
-    const el = document.getElementById("call-duration");
+    const el  = document.getElementById("call-duration");
+    const dot = document.getElementById("statusDot");
+    if (dot) dot.classList.add("active");
     callTimerInterval = setInterval(() => {
         const total = Math.floor((Date.now() - startTime) / 1000);
         const h = Math.floor(total / 3600);
         const m = Math.floor((total % 3600) / 60);
         const s = total % 60;
-        el.textContent = h > 0
-            ? `${pad(h)}:${pad(m)}:${pad(s)}`
-            : `${pad(m)}:${pad(s)}`;
+        el.textContent = h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
     }, 1000);
-    // Show the status dot as green/active
-    document.querySelector(".status-dot")?.classList.add("active");
 });
 
-/* Mute state change */
 socket.on("mute-status", (userId, muted) => {
     muteState[userId] = muted;
     const icon = document.getElementById("mute-icon-" + userId);
@@ -190,57 +177,64 @@ socket.on("mute-status", (userId, muted) => {
     renderParticipants();
 });
 
-/* Camera state change */
 socket.on("camera-status", (userId, isOn) => {
     camState[userId] = isOn;
-    applyRemoteCamState(userId, isOn);
+    applyRemoteCam(userId, isOn);
     renderParticipants();
 });
 
-/* Group message */
+socket.on("screen-sharing", (userId, isSharing, sharerName) => {
+    const banner     = document.getElementById("screenBanner");
+    const bannerText = document.getElementById("screenBannerText");
+    if (isSharing) {
+        if (banner) { banner.style.display = "flex"; bannerText.textContent = `${sharerName} is sharing their screen`; }
+        showToast(`${sharerName} started screen sharing`, "info");
+    } else {
+        if (banner) banner.style.display = "none";
+        showToast(`${sharerName} stopped screen sharing`, "info");
+    }
+});
+
 socket.on("group-message", (payload) => {
     const isMe = (payload.senderId === socket.id);
-    appendGroupMessage(payload, isMe);
+    appendGroupMsg(payload, isMe);
     if (!isMe) {
-        if (activeTab !== "group" || !panelVisible) {
+        if (activeTab !== "group" || !panelOpen) {
             groupUnread++;
-            updateUnreadBadges();
+            updateBadges();
         }
     }
 });
 
-/* Private message received */
 socket.on("private-message", (payload) => {
-    const senderId = payload.senderId;
-    if (!dmHistory[senderId]) dmHistory[senderId] = [];
-    dmHistory[senderId].push({ ...payload, isMe: false });
-
-    if (activeDMId === senderId && activeTab === "private" && panelVisible) {
-        appendDMMessage(payload, false);
+    const sid = payload.senderId;
+    if (!dmHistory[sid]) dmHistory[sid] = [];
+    dmHistory[sid].push({ ...payload, isMe: false });
+    if (activeDMId === sid && activeTab === "private" && panelOpen) {
+        appendDMMsg(payload, false);
     } else {
         privateUnread++;
-        updateUnreadBadges();
-        showToast(`💬 ${payload.senderName}: ${payload.message.substring(0, 50)}`, "dm");
+        updateBadges();
+        showToast(`\uD83D\uDCAC ${payload.senderName}: ${payload.message.substring(0, 45)}`, "dm");
     }
 });
 
-/* Echo of our own private message */
 socket.on("private-message-echo", (payload) => {
     const rid = payload.recipientId;
     if (!dmHistory[rid]) dmHistory[rid] = [];
     dmHistory[rid].push({ ...payload, isMe: true });
-    if (activeDMId === rid && activeTab === "private" && panelVisible) {
-        appendDMMessage({ ...payload, senderName: "You" }, true);
+    if (activeDMId === rid && activeTab === "private" && panelOpen) {
+        appendDMMsg({ ...payload, senderName: "You" }, true);
     }
 });
 
-/* ════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════
    PEER CONNECTIONS
-   ════════════════════════════════════════════════════ */
+   ══════════════════════════════════════════════════ */
 function createPeer(userId) {
     if (peers[userId]) peers[userId].close();
-
     const peer = new RTCPeerConnection(RTC_CONFIG);
+
     localStream.getTracks().forEach(t => peer.addTrack(t, localStream));
 
     peer.ontrack = ({ streams: [stream] }) => {
@@ -257,9 +251,7 @@ function createPeer(userId) {
     };
 
     peer.onconnectionstatechange = () => {
-        if (peer.connectionState === "failed" && socket.id < userId) {
-            peer.restartIce();
-        }
+        if (peer.connectionState === "failed" && socket.id < userId) peer.restartIce();
     };
 
     peers[userId] = peer;
@@ -268,7 +260,7 @@ function createPeer(userId) {
 
 async function connectToUser(userId) {
     const peer  = createPeer(userId);
-    const offer = await peer.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+    const offer = await peer.createOffer({ offerToReceiveAudio:true, offerToReceiveVideo:true });
     await peer.setLocalDescription(offer);
     socket.emit("offer", offer, userId);
 }
@@ -280,7 +272,7 @@ function flushCandidates(userId) {
     delete pendingCandidates[userId];
 }
 
-function closePeerConnection(userId) {
+function closePeer(userId) {
     peers[userId]?.close();
     delete peers[userId];
     delete pendingCandidates[userId];
@@ -289,7 +281,7 @@ function closePeerConnection(userId) {
     delete camState[userId];
     document.getElementById("container-" + userId)?.remove();
 
-    // Revert main video to local if it was showing this user
+    // Revert main video to local if needed
     const mv = document.getElementById("mainVideo");
     if (mv && !document.getElementById(userId)) {
         mv.srcObject = localStream;
@@ -299,17 +291,93 @@ function closePeerConnection(userId) {
     }
 }
 
-/* ════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════
+   SCREEN SHARING
+   ══════════════════════════════════════════════════ */
+async function toggleScreenShare() {
+    if (!isSharingScreen) {
+        try {
+            screenStream = await navigator.mediaDevices.getDisplayMedia({
+                video: { cursor: "always" },
+                audio: false
+            });
+
+            /* Replace video track in all existing peer connections */
+            const screenTrack = screenStream.getVideoTracks()[0];
+            Object.values(peers).forEach(peer => {
+                const sender = peer.getSenders().find(s => s.track?.kind === "video");
+                if (sender) sender.replaceTrack(screenTrack);
+            });
+
+            /* Show screen in main video locally */
+            spotlightVideo("local", screenStream, `You (${username}) · Screen`);
+            const mv = document.getElementById("mainVideo");
+            if (mv) { mv.muted = true; mv.classList.remove("mirror"); }
+
+            isSharingScreen = true;
+            socket.emit("screen-sharing", true);
+
+            /* Update button */
+            const btn  = document.getElementById("btnScreen");
+            const icon = btn?.querySelector("i");
+            if (icon) icon.className = "fa-solid fa-display-slash";
+            btn?.classList.add("ctrl-sharing");
+            document.getElementById("lblScreen").textContent = "Stop Share";
+
+            showToast("Screen sharing started", "info");
+
+            /* Listen for user stopping share via browser UI */
+            screenTrack.onended = () => stopScreenShare();
+
+        } catch(e) {
+            if (e.name !== "NotAllowedError") {
+                showToast("Screen sharing not supported or denied", "error");
+            }
+        }
+    } else {
+        stopScreenShare();
+    }
+}
+
+function stopScreenShare() {
+    if (!isSharingScreen) return;
+
+    /* Restore camera track in all peers */
+    const camTrack = localStream.getVideoTracks()[0];
+    Object.values(peers).forEach(peer => {
+        const sender = peer.getSenders().find(s => s.track?.kind === "video");
+        if (sender && camTrack) sender.replaceTrack(camTrack);
+    });
+
+    screenStream?.getTracks().forEach(t => t.stop());
+    screenStream = null;
+    isSharingScreen = false;
+    socket.emit("screen-sharing", false);
+
+    /* Restore local video */
+    spotlightVideo("local", localStream, `You (${username})`);
+    const mv = document.getElementById("mainVideo");
+    if (mv) { mv.muted = true; mv.classList.add("mirror"); }
+
+    const btn  = document.getElementById("btnScreen");
+    const icon = btn?.querySelector("i");
+    if (icon) icon.className = "fa-solid fa-display";
+    btn?.classList.remove("ctrl-sharing");
+    document.getElementById("lblScreen").textContent = "Share";
+
+    document.getElementById("screenBanner").style.display = "none";
+    showToast("Screen sharing stopped", "info");
+}
+
+/* ══════════════════════════════════════════════════
    VIDEO UI
-   ════════════════════════════════════════════════════ */
+   ══════════════════════════════════════════════════ */
 function addVideoStream(stream, id, name) {
     if (document.getElementById("container-" + id)) return;
 
-    const wrap  = document.getElementById("video-grid");
     const outer = document.createElement("div");
     outer.className = "thumb-card";
     outer.id = "container-" + id;
-    outer.title = "Click to spotlight";
     outer.onclick = () => spotlightVideo(id, stream, id === "local" ? `You (${username})` : name);
 
     const video = document.createElement("video");
@@ -323,7 +391,6 @@ function addVideoStream(stream, id, name) {
 
     const labelEl = document.createElement("div");
     labelEl.className = "thumb-name";
-    labelEl.id = "label-" + id;
     labelEl.textContent = id === "local" ? `You (${username})` : name;
 
     const muteEl = document.createElement("div");
@@ -333,15 +400,14 @@ function addVideoStream(stream, id, name) {
     muteEl.style.display = (muteState[id] ? "flex" : "none");
 
     outer.append(video, labelEl, muteEl);
-    wrap.appendChild(outer);
+    document.getElementById("video-grid").appendChild(outer);
 
-    // Spotlight: set as main video (prefer remote)
+    /* Set main video: prefer remote */
     const mv = document.getElementById("mainVideo");
     if (mv && (!mv.srcObject || id !== "local")) {
         spotlightVideo(id, stream, id === "local" ? `You (${username})` : name);
     }
 
-    // If camera already known to be off, show avatar
     if (camState[id] === false) {
         video.style.display = "none";
         injectAvatar(outer, id);
@@ -356,22 +422,20 @@ function spotlightVideo(id, stream, label) {
     mv.muted = (id === "local");
     id === "local" ? mv.classList.add("mirror") : mv.classList.remove("mirror");
     if (ml) ml.textContent = label;
-
-    // Highlight the active thumb
     document.querySelectorAll(".thumb-card").forEach(c => c.classList.remove("spotlit"));
     document.getElementById("container-" + id)?.classList.add("spotlit");
 }
 
-function applyRemoteCamState(userId, isOn) {
+function applyRemoteCam(userId, isOn) {
     const cont   = document.getElementById("container-" + userId);
     const video  = document.getElementById(userId);
     const avatar = document.getElementById("avatar-" + userId);
     if (!cont) return;
     if (!isOn) {
-        if (video)  video.style.display = "none";
+        if (video) video.style.display = "none";
         if (!avatar) injectAvatar(cont, userId);
     } else {
-        if (video)  video.style.display = "";
+        if (video) video.style.display = "";
         avatar?.remove();
     }
 }
@@ -380,14 +444,13 @@ function injectAvatar(container, id) {
     const av = document.createElement("div");
     av.className = "thumb-avatar";
     av.id = "avatar-" + id;
-    av.textContent = (id === "local" ? username : userNames[id] || "?")
-                        .charAt(0).toUpperCase();
+    av.textContent = (id === "local" ? username : userNames[id] || "?").charAt(0).toUpperCase();
     container.appendChild(av);
 }
 
-/* ════════════════════════════════════════════════════
-   CONTROLS
-   ════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════
+   MEDIA CONTROLS
+   ══════════════════════════════════════════════════ */
 function toggleMute() {
     const track = localStream?.getAudioTracks()[0];
     if (!track) return;
@@ -397,15 +460,12 @@ function toggleMute() {
 
     const btn  = document.getElementById("btnMute");
     const icon = btn?.querySelector("i");
-    if (icon) icon.className = isMuted
-        ? "fa-solid fa-microphone-slash"
-        : "fa-solid fa-microphone";
+    if (icon) icon.className = isMuted ? "fa-solid fa-microphone-slash" : "fa-solid fa-microphone";
     btn?.classList.toggle("ctrl-off", isMuted);
-    document.querySelector(".ctrl-item:nth-child(1) .ctrl-label").textContent =
-        isMuted ? "Unmute" : "Mute";
+    document.getElementById("lblMute").textContent = isMuted ? "Unmute" : "Mute";
 
-    const thumbMute = document.getElementById("mute-icon-local");
-    if (thumbMute) thumbMute.style.display = isMuted ? "flex" : "none";
+    const tm = document.getElementById("mute-icon-local");
+    if (tm) tm.style.display = isMuted ? "flex" : "none";
 
     socket.emit("mute-status", isMuted);
     renderParticipants();
@@ -420,12 +480,9 @@ function toggleVideo() {
 
     const btn  = document.getElementById("btnVideo");
     const icon = btn?.querySelector("i");
-    if (icon) icon.className = isCameraOn
-        ? "fa-solid fa-video"
-        : "fa-solid fa-video-slash";
+    if (icon) icon.className = isCameraOn ? "fa-solid fa-video" : "fa-solid fa-video-slash";
     btn?.classList.toggle("ctrl-off", !isCameraOn);
-    document.querySelector(".ctrl-item:nth-child(2) .ctrl-label").textContent =
-        isCameraOn ? "Camera" : "Start Cam";
+    document.getElementById("lblVideo").textContent = isCameraOn ? "Camera" : "Start Cam";
 
     const cont   = document.getElementById("container-local");
     const video  = document.getElementById("local");
@@ -442,59 +499,42 @@ function toggleVideo() {
     renderParticipants();
 }
 
+/* ══════════════════════════════════════════════════
+   PANEL  (desktop: sidebar / mobile: slide-over)
+   ══════════════════════════════════════════════════ */
+function openPanel() {
+    panelOpen = true;
+    const panel    = document.getElementById("sidePanel");
+    const backdrop = document.getElementById("panelBackdrop");
+    panel?.classList.add("panel-open");
+    backdrop?.classList.add("backdrop-show");
+}
+
+function closePanel() {
+    panelOpen = false;
+    const panel    = document.getElementById("sidePanel");
+    const backdrop = document.getElementById("panelBackdrop");
+    panel?.classList.remove("panel-open");
+    backdrop?.classList.remove("backdrop-show");
+}
+
 function togglePanel() {
-    panelVisible = !panelVisible;
-    const panel = document.getElementById("sidePanel");
-    panel?.classList.toggle("panel-hidden", !panelVisible);
+    panelOpen ? closePanel() : openPanel();
 }
 
 function openGroupChat() {
-    panelVisible = true;
-    document.getElementById("sidePanel")?.classList.remove("panel-hidden");
+    openPanel();
     switchTab("group");
 }
 
 function openPeople() {
-    panelVisible = true;
-    document.getElementById("sidePanel")?.classList.remove("panel-hidden");
+    openPanel();
     switchTab("participants");
 }
 
-/* ════════════════════════════════════════════════════
-   FULLSCREEN / PiP
-   ════════════════════════════════════════════════════ */
-function toggleFullscreen() {
-    const wrap = document.getElementById("mainVideoWrap");
-    if (!document.fullscreenElement) wrap?.requestFullscreen();
-    else document.exitFullscreen();
-}
-
-async function togglePiP() {
-    const video = document.getElementById("mainVideo");
-    try {
-        if (document.pictureInPictureElement) await document.exitPictureInPicture();
-        else {
-            if (document.fullscreenElement) await document.exitFullscreen();
-            await video.requestPictureInPicture();
-        }
-    } catch (e) { console.warn("PiP:", e); }
-}
-
-/* ════════════════════════════════════════════════════
-   END CALL
-   ════════════════════════════════════════════════════ */
-function endCall() {
-    if (!confirm("Leave this meeting?")) return;
-    localStream?.getTracks().forEach(t => t.stop());
-    Object.values(peers).forEach(p => p.close());
-    if (callTimerInterval) clearInterval(callTimerInterval);
-    socket.disconnect();
-    window.location.href = "/";
-}
-
-/* ════════════════════════════════════════════════════
-   PANEL TABS
-   ════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════
+   TABS
+   ══════════════════════════════════════════════════ */
 function switchTab(tab) {
     activeTab = tab;
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
@@ -502,67 +542,51 @@ function switchTab(tab) {
     document.getElementById("tab-" + tab)?.classList.add("active");
     document.getElementById("pane-" + tab)?.classList.add("active");
 
-    if (tab === "group") {
-        groupUnread = 0;
-        updateUnreadBadges();
-        scrollToBottom("group-messages");
-    }
-    if (tab === "private") {
-        privateUnread = 0;
-        updateUnreadBadges();
-    }
+    if (tab === "group")   { groupUnread   = 0; updateBadges(); scrollBottom("group-messages"); }
+    if (tab === "private") { privateUnread = 0; updateBadges(); }
     if (tab === "participants") renderParticipants();
 }
 
-/* ════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════
    PARTICIPANTS
-   ════════════════════════════════════════════════════ */
+   ══════════════════════════════════════════════════ */
 function renderParticipants() {
     const list = document.getElementById("participants-list");
     if (!list) return;
     list.innerHTML = "";
-
-    // Local user
     appendParticipantRow("local", `You (${username})`);
-
-    // Remote users
     Object.keys(userNames).forEach(id => appendParticipantRow(id, userNames[id]));
 }
 
 function appendParticipantRow(id, name) {
-    const list = document.getElementById("participants-list");
-    const row  = document.createElement("div");
+    const list    = document.getElementById("participants-list");
+    const row     = document.createElement("div");
     row.className = "p-row";
-
-    const initials = getInitials(name);
-    const micOff   = muteState[id];
-    const camOff   = camState[id] === false;
-    const isLocal  = (id === "local");
+    const micOff  = muteState[id];
+    const camOff  = camState[id] === false;
+    const isLocal = (id === "local");
 
     row.innerHTML = `
-      <div class="p-av" style="background:${avatarColor(name)}">${initials}</div>
+      <div class="p-av" style="background:${avatarColor(name)}">${getInitials(name)}</div>
       <div class="p-info">
         <div class="p-name">${esc(name)}</div>
-        ${isLocal ? '<div class="p-you-tag">You</div>' : ""}
+        ${isLocal ? '<span class="p-you-tag">You</span>' : ""}
       </div>
       <div class="p-status">
-        <span class="p-icon ${micOff ? "off" : ""}" title="${micOff ? "Muted" : "Unmuted"}">
-          <i class="fa-solid ${micOff ? "fa-microphone-slash" : "fa-microphone"}"></i>
+        <span class="p-icon ${micOff?"off":""}">
+          <i class="fa-solid ${micOff?"fa-microphone-slash":"fa-microphone"}"></i>
         </span>
-        <span class="p-icon ${camOff ? "off" : ""}" title="${camOff ? "Camera off" : "Camera on"}">
-          <i class="fa-solid ${camOff ? "fa-video-slash" : "fa-video"}"></i>
+        <span class="p-icon ${camOff?"off":""}">
+          <i class="fa-solid ${camOff?"fa-video-slash":"fa-video"}"></i>
         </span>
-        ${!isLocal ? `<button class="p-dm-btn" onclick="openDM('${id}')" title="Send DM">
-          <i class="fa-solid fa-message"></i>
-        </button>` : ""}
-      </div>
-    `;
+        ${!isLocal ? `<button class="p-dm-btn" onclick="openDM('${id}')" title="DM"><i class="fa-solid fa-message"></i></button>` : ""}
+      </div>`;
     list.appendChild(row);
 }
 
-/* ════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════
    GROUP CHAT
-   ════════════════════════════════════════════════════ */
+   ══════════════════════════════════════════════════ */
 function sendGroupMessage() {
     const input = document.getElementById("group-input");
     const text  = input.value.trim();
@@ -572,105 +596,67 @@ function sendGroupMessage() {
     input.focus();
 }
 
-function appendGroupMessage(payload, isMe) {
+function appendGroupMsg(payload, isMe) {
     const area = document.getElementById("group-messages");
     if (!area) return;
-
-    // Time separator if needed
-    maybeInsertTimeSeparator(area, payload.time);
-
-    const wrap = document.createElement("div");
-    wrap.className = "msg-wrap " + (isMe ? "msg-me" : "msg-them");
-
-    if (!isMe) {
-        wrap.innerHTML = `
-          <div class="msg-av" style="background:${avatarColor(payload.senderName)}">${getInitials(payload.senderName)}</div>
-          <div class="msg-body">
-            <div class="msg-sender">${esc(payload.senderName)}</div>
-            <div class="msg-bubble">${esc(payload.message)}</div>
-            <div class="msg-time">${formatTime(payload.time)}</div>
-          </div>
-        `;
-    } else {
-        wrap.innerHTML = `
-          <div class="msg-body">
-            <div class="msg-bubble">${esc(payload.message)}</div>
-            <div class="msg-time">${formatTime(payload.time)}</div>
-          </div>
-        `;
-    }
-
+    const wrap = buildMsgBubble(payload, isMe, false);
     area.appendChild(wrap);
     animateIn(wrap);
-    scrollToBottom("group-messages");
+    scrollBottom("group-messages");
 }
 
-/* ════════════════════════════════════════════════════
-   PRIVATE / DM CHAT
-   ════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════
+   PRIVATE DM
+   ══════════════════════════════════════════════════ */
 function refreshDMList() {
     const list = document.getElementById("dm-user-list");
     if (!list) return;
     list.innerHTML = "";
-
-    Object.keys(userNames).forEach(id => {
-        const name  = userNames[id];
-        const item  = document.createElement("div");
+    const ids = Object.keys(userNames);
+    if (ids.length === 0) {
+        list.innerHTML = `<div class="dm-empty"><i class="fa-solid fa-user-group"></i><p>No other participants yet</p></div>`;
+        return;
+    }
+    ids.forEach(id => {
+        const name = userNames[id];
+        const item = document.createElement("div");
         item.className = "dm-item";
         item.onclick   = () => openDM(id);
         item.innerHTML = `
           <div class="dm-av" style="background:${avatarColor(name)}">${getInitials(name)}</div>
           <div class="dm-info">
             <div class="dm-name">${esc(name)}</div>
-            <div class="dm-hint">Tap to start private chat</div>
+            <div class="dm-hint">Tap to chat privately</div>
           </div>
-          <i class="fa-solid fa-chevron-right dm-arrow"></i>
-        `;
+          <i class="fa-solid fa-chevron-right dm-arrow"></i>`;
         list.appendChild(item);
     });
-
-    if (list.children.length === 0) {
-        list.innerHTML = `<div class="dm-empty">
-          <i class="fa-solid fa-user-group"></i>
-          <p>No other participants yet</p>
-        </div>`;
-    }
 }
 
 function openDM(userId) {
     activeDMId = userId;
     const name = userNames[userId] || "Unknown";
-
-    // Show conversation pane
     document.getElementById("dm-pane")?.classList.add("hidden");
-    const conv = document.getElementById("dm-conversation");
-    conv?.classList.remove("hidden");
-
-    // Set header
-    document.getElementById("dm-conv-name").textContent = name;
-    document.getElementById("dm-conv-avatar").textContent = getInitials(name);
+    document.getElementById("dm-conversation")?.classList.remove("hidden");
+    document.getElementById("dm-conv-name").textContent    = name;
+    document.getElementById("dm-conv-avatar").textContent  = getInitials(name);
     document.getElementById("dm-conv-avatar").style.background = avatarColor(name);
 
-    // Render history
     const area = document.getElementById("dm-messages");
     if (area) {
         area.innerHTML = "";
-        (dmHistory[userId] || []).forEach(m => appendDMMessage(m, m.isMe));
-        if (area.children.length === 0) {
-            area.innerHTML = `<div class="dm-no-msgs">
-              <i class="fa-regular fa-comment-dots"></i>
-              <p>Start the conversation with <strong>${esc(name)}</strong></p>
-            </div>`;
+        const hist = dmHistory[userId] || [];
+        if (hist.length === 0) {
+            area.innerHTML = `<div class="dm-no-msgs"><i class="fa-regular fa-comment-dots"></i><p>Start the conversation with <strong>${esc(name)}</strong></p></div>`;
+        } else {
+            hist.forEach(m => appendDMMsg(m, m.isMe));
         }
     }
-
-    scrollToBottom("dm-messages");
+    scrollBottom("dm-messages");
     document.getElementById("dm-input")?.focus();
-
-    // Switch to private tab
     switchTab("private");
     privateUnread = 0;
-    updateUnreadBadges();
+    updateBadges();
 }
 
 function closeDM() {
@@ -688,147 +674,145 @@ function sendPrivateMessage() {
     input.value = "";
     input.focus();
 
-    // Optimistic local append
     const payload = { senderName: username, message: text, time: Date.now() };
     if (!dmHistory[activeDMId]) dmHistory[activeDMId] = [];
     dmHistory[activeDMId].push({ ...payload, isMe: true });
-    appendDMMessage(payload, true);
-
-    // Clear "no messages" placeholder
     document.querySelector("#dm-messages .dm-no-msgs")?.remove();
+    appendDMMsg(payload, true);
 }
 
-function appendDMMessage(payload, isMe) {
+function appendDMMsg(payload, isMe) {
     const area = document.getElementById("dm-messages");
     if (!area) return;
+    const wrap = buildMsgBubble(payload, isMe, true);
+    area.appendChild(wrap);
+    animateIn(wrap);
+    scrollBottom("dm-messages");
+}
 
+/* shared bubble builder */
+function buildMsgBubble(payload, isMe, isDM) {
     const wrap = document.createElement("div");
     wrap.className = "msg-wrap " + (isMe ? "msg-me" : "msg-them");
-
+    const dmClass = isDM ? " dm-bubble" : "";
     if (!isMe) {
         wrap.innerHTML = `
           <div class="msg-av" style="background:${avatarColor(payload.senderName)}">${getInitials(payload.senderName)}</div>
           <div class="msg-body">
-            <div class="msg-bubble dm-bubble">${esc(payload.message)}</div>
-            <div class="msg-time">${formatTime(payload.time)}</div>
-          </div>
-        `;
+            <div class="msg-sender">${esc(payload.senderName)}</div>
+            <div class="msg-bubble${dmClass}">${esc(payload.message)}</div>
+            <div class="msg-time">${fmtTime(payload.time)}</div>
+          </div>`;
     } else {
         wrap.innerHTML = `
           <div class="msg-body">
-            <div class="msg-bubble dm-bubble">${esc(payload.message)}</div>
-            <div class="msg-time">${formatTime(payload.time)}</div>
-          </div>
-        `;
+            <div class="msg-bubble${dmClass}">${esc(payload.message)}</div>
+            <div class="msg-time">${fmtTime(payload.time)}</div>
+          </div>`;
     }
-
-    area.appendChild(wrap);
-    animateIn(wrap);
-    scrollToBottom("dm-messages");
+    return wrap;
 }
 
-/* ════════════════════════════════════════════════════
-   UNREAD BADGES
-   ════════════════════════════════════════════════════ */
-function updateUnreadBadges() {
+/* ══════════════════════════════════════════════════
+   BADGES / TOAST
+   ══════════════════════════════════════════════════ */
+function updateBadges() {
     const gb = document.getElementById("badge-group");
     const pb = document.getElementById("badge-private");
     const cu = document.getElementById("ctrl-unread");
-
-    if (gb) { gb.textContent = groupUnread || ""; gb.style.display = groupUnread ? "" : "none"; }
-    if (pb) { pb.textContent = privateUnread || ""; pb.style.display = privateUnread ? "" : "none"; }
-
+    setB(gb, groupUnread);
+    setB(pb, privateUnread);
     const total = groupUnread + privateUnread;
     if (cu) { cu.textContent = total || ""; cu.style.display = total ? "flex" : "none"; }
 }
+function setB(el, n) { if (el) { el.textContent = n || ""; el.style.display = n ? "" : "none"; } }
 
-/* ════════════════════════════════════════════════════
-   TOAST NOTIFICATIONS
-   ════════════════════════════════════════════════════ */
-let toastTimeout;
+let _toastT;
 function showToast(msg, type = "info") {
     const el = document.getElementById("toast");
     if (!el) return;
     el.textContent = msg;
-    el.className = `toast toast-${type} toast-show`;
-    if (toastTimeout) clearTimeout(toastTimeout);
-    toastTimeout = setTimeout(() => el.classList.remove("toast-show"), 3500);
+    el.className   = `toast toast-${type} toast-show`;
+    if (_toastT) clearTimeout(_toastT);
+    _toastT = setTimeout(() => el.classList.remove("toast-show"), 3500);
 }
 
-/* ════════════════════════════════════════════════════
-   INPUT BINDING
-   ════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════
+   FULLSCREEN / PIP / END
+   ══════════════════════════════════════════════════ */
+function toggleFullscreen() {
+    const w = document.getElementById("mainVideoWrap");
+    if (!document.fullscreenElement) w?.requestFullscreen();
+    else document.exitFullscreen();
+}
+
+async function togglePiP() {
+    const v = document.getElementById("mainVideo");
+    try {
+        if (document.pictureInPictureElement) await document.exitPictureInPicture();
+        else {
+            if (document.fullscreenElement) await document.exitFullscreen();
+            await v.requestPictureInPicture();
+        }
+    } catch(e) {}
+}
+
+function endCall() {
+    if (!confirm("Leave this meeting?")) return;
+    if (isSharingScreen) stopScreenShare();
+    localStream?.getTracks().forEach(t => t.stop());
+    Object.values(peers).forEach(p => p.close());
+    if (callTimerInterval) clearInterval(callTimerInterval);
+    socket.disconnect();
+    window.location.href = "/";
+}
+
+/* ══════════════════════════════════════════════════
+   INPUT BINDING  (mobile-safe)
+   ══════════════════════════════════════════════════ */
 function bindInputs() {
-    document.getElementById("group-input")?.addEventListener("keydown", e => {
-        if (e.key === "Enter") { e.preventDefault(); sendGroupMessage(); }
-    });
-    document.getElementById("dm-input")?.addEventListener("keydown", e => {
-        if (e.key === "Enter") { e.preventDefault(); sendPrivateMessage(); }
-    });
-}
+    /* Use both keydown AND input event for mobile compatibility */
+    const gi = document.getElementById("group-input");
+    const di = document.getElementById("dm-input");
 
-/* ════════════════════════════════════════════════════
-   HELPERS
-   ════════════════════════════════════════════════════ */
-function esc(text = "") {
-    return String(text)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
-}
-
-function pad(n) { return String(n).padStart(2, "0"); }
-
-function formatTime(ts) {
-    const d = new Date(ts);
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function formatDate(d) {
-    return d.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
-}
-
-function getInitials(name = "?") {
-    return name.trim().split(/\s+/).map(w => w[0]).join("").substring(0, 2).toUpperCase();
-}
-
-const COLOR_PALETTE = ["#4f8ef7","#7c4dff","#00b894","#e17055","#fdcb6e","#a29bfe","#55efc4","#fd79a8"];
-function avatarColor(name = "") {
-    let hash = 0;
-    for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
-    return COLOR_PALETTE[Math.abs(hash) % COLOR_PALETTE.length];
-}
-
-function scrollToBottom(id) {
-    const el = document.getElementById(id);
-    if (el) el.scrollTop = el.scrollHeight;
-}
-
-function animateIn(el) {
-    el.style.opacity = "0";
-    el.style.transform = "translateY(8px)";
-    requestAnimationFrame(() => {
-        el.style.transition = "opacity 0.2s ease, transform 0.2s ease";
-        el.style.opacity = "1";
-        el.style.transform = "translateY(0)";
-    });
-}
-
-let lastSeparatorDate = null;
-function maybeInsertTimeSeparator(area, ts) {
-    const d = new Date(ts);
-    const key = d.toDateString();
-    if (lastSeparatorDate !== key) {
-        lastSeparatorDate = key;
-        const sep = document.createElement("div");
-        sep.className = "time-separator";
-        sep.textContent = formatDate(d);
-        area.appendChild(sep);
+    if (gi) {
+        gi.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); sendGroupMessage(); } });
+        /* mobile "Go" / "Send" button fires this */
+        gi.addEventListener("change", () => { if (gi.value.trim()) sendGroupMessage(); });
+    }
+    if (di) {
+        di.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); sendPrivateMessage(); } });
+        di.addEventListener("change", () => { if (di.value.trim()) sendPrivateMessage(); });
     }
 }
 
-/* ════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════
+   HELPERS
+   ══════════════════════════════════════════════════ */
+function esc(t = "") {
+    return String(t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+function pad(n)      { return String(n).padStart(2, "0"); }
+function fmtTime(ts) { return new Date(ts).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" }); }
+function getInitials(name = "?") {
+    return name.trim().split(/\s+/).map(w => w[0]).join("").substring(0, 2).toUpperCase();
+}
+const COLORS = ["#4f8ef7","#7c4dff","#00b894","#e17055","#fdcb6e","#a29bfe","#55efc4","#fd79a8"];
+function avatarColor(name = "") {
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = name.charCodeAt(i) + ((h << 5) - h);
+    return COLORS[Math.abs(h) % COLORS.length];
+}
+function scrollBottom(id) { const el = document.getElementById(id); if (el) el.scrollTop = el.scrollHeight; }
+function animateIn(el) {
+    el.style.opacity = "0"; el.style.transform = "translateY(8px)";
+    requestAnimationFrame(() => {
+        el.style.transition = "opacity 0.2s ease, transform 0.2s ease";
+        el.style.opacity = "1"; el.style.transform = "translateY(0)";
+    });
+}
+
+/* ══════════════════════════════════════════════════
    BOOT
-   ════════════════════════════════════════════════════ */
+   ══════════════════════════════════════════════════ */
 init();

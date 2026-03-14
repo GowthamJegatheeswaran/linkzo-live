@@ -8,123 +8,66 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
 </head>
 <body class="join-body">
-
   <nav class="join-nav">
-    <div class="nav-brand">
-      <span class="nav-dot"></span>
-      <span class="nav-name">Linkzo Live</span>
-    </div>
-    <div class="nav-badge">
-      <i class="fa-solid fa-lock"></i> Secure &nbsp;·&nbsp;
-      <i class="fa-solid fa-tower-broadcast"></i> HD &nbsp;·&nbsp;
-      <i class="fa-solid fa-bolt"></i> Real-time
-    </div>
+    <div class="nav-brand"><span class="nav-dot"></span><span class="nav-name">Linkzo Live</span></div>
+    <div class="nav-badge"><i class="fa-solid fa-lock"></i> Secure &nbsp;·&nbsp; <i class="fa-solid fa-tower-broadcast"></i> HD &nbsp;·&nbsp; <i class="fa-solid fa-bolt"></i> Real-time</div>
   </nav>
-
   <div class="join-layout">
-
-    <!-- LEFT -->
     <div class="join-hero">
       <img src="linkzo-logo.png" class="hero-logo" alt="Linkzo">
       <h1 class="hero-title">Connect.<br>Collaborate.<br>Communicate.</h1>
       <p class="hero-sub">Crystal-clear video meetings across any network, anywhere in the world.</p>
-
       <div class="hero-features">
-        <div class="hf-item">
-          <span class="hf-icon"><i class="fa-solid fa-shield-halved"></i></span>
-          <div>
-            <div class="hf-title">End-to-end Encrypted</div>
-            <div class="hf-desc">WebRTC peer-to-peer, no middleman</div>
-          </div>
-        </div>
-        <div class="hf-item">
-          <span class="hf-icon"><i class="fa-solid fa-users-rectangle"></i></span>
-          <div>
-            <div class="hf-title">Group &amp; Private Chat</div>
-            <div class="hf-desc">Message everyone or send direct DMs</div>
-          </div>
-        </div>
-        <div class="hf-item">
-          <span class="hf-icon"><i class="fa-solid fa-globe"></i></span>
-          <div>
-            <div class="hf-title">Works Across Networks</div>
-            <div class="hf-desc">Different WiFi, mobile data — no problem</div>
-          </div>
-        </div>
+        <div class="hf-item"><span class="hf-icon"><i class="fa-solid fa-shield-halved"></i></span><div><div class="hf-title">Peer-to-peer Encrypted</div><div class="hf-desc">WebRTC — no middleman</div></div></div>
+        <div class="hf-item"><span class="hf-icon"><i class="fa-solid fa-display"></i></span><div><div class="hf-title">Screen Sharing</div><div class="hf-desc">Share your screen with one click</div></div></div>
+        <div class="hf-item"><span class="hf-icon"><i class="fa-solid fa-comments"></i></span><div><div class="hf-title">Group &amp; Private Chat</div><div class="hf-desc">Message everyone or send DMs</div></div></div>
+        <div class="hf-item"><span class="hf-icon"><i class="fa-solid fa-globe"></i></span><div><div class="hf-title">Works Across Networks</div><div class="hf-desc">Different WiFi, mobile data — no issue</div></div></div>
       </div>
     </div>
-
-    <!-- RIGHT CARD -->
     <div class="join-card">
       <h2 class="card-heading">Join a Meeting</h2>
       <p class="card-sub">No account needed. Just enter and go.</p>
-
       <div class="field-group">
-        <label class="field-label">
-          <i class="fa-regular fa-user"></i> Your Name
-        </label>
-        <input class="field-input" type="text" id="username"
-               placeholder="Enter your display name" autocomplete="name">
+        <label class="field-label"><i class="fa-regular fa-user"></i> Your Name</label>
+        <input class="field-input" type="text" id="username" placeholder="Enter your display name" autocomplete="name">
       </div>
-
       <div class="field-group">
-        <label class="field-label">
-          <i class="fa-solid fa-hashtag"></i> Room ID
-        </label>
+        <label class="field-label"><i class="fa-solid fa-hashtag"></i> Room ID</label>
         <div class="room-row">
-          <input class="field-input" type="text" id="roomId"
-                 placeholder="Enter or generate a Room ID" autocomplete="off">
-          <button class="gen-btn" onclick="generateRoom()" title="Generate random ID">
-            <i class="fa-solid fa-shuffle"></i>
-          </button>
+          <input class="field-input" type="text" id="roomId" placeholder="Enter or generate a Room ID" autocomplete="off">
+          <button class="gen-btn" onclick="generateRoom()" title="Generate random ID"><i class="fa-solid fa-shuffle"></i></button>
         </div>
       </div>
-
-      <button class="join-btn" onclick="joinRoom()">
-        <i class="fa-solid fa-video"></i>
-        Start Meeting
-      </button>
-
+      <button class="join-btn" onclick="joinRoom()"><i class="fa-solid fa-video"></i> Start Meeting</button>
       <div class="divider"></div>
-
-      <p class="card-note">
-        <i class="fa-regular fa-circle-question"></i>
-        Share the Room ID with others so they can join your meeting.
-      </p>
+      <p class="card-note"><i class="fa-regular fa-circle-question"></i> Share the Room ID with others so they can join your meeting.</p>
     </div>
-
   </div>
-
   <script>
     function joinRoom() {
       const name = document.getElementById("username").value.trim();
       const room = document.getElementById("roomId").value.trim();
-      if (!name) { showError("username", "Please enter your name"); return; }
-      if (!room) { showError("roomId",   "Please enter a Room ID");  return; }
+      if (!name) { flashError("username"); return; }
+      if (!room) { flashError("roomId");   return; }
       localStorage.setItem("username", name);
       window.location.href = "meeting.html?room=" + encodeURIComponent(room);
     }
-
     function generateRoom() {
       const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
       let id = "";
       for (let i = 0; i < 6; i++) id += chars[Math.floor(Math.random() * chars.length)];
       document.getElementById("roomId").value = id;
-      document.getElementById("roomId").focus();
     }
-
-    function showError(fieldId, msg) {
-      const el = document.getElementById(fieldId);
+    function flashError(id) {
+      const el = document.getElementById(id);
       el.classList.add("input-error");
-      el.placeholder = msg;
       el.focus();
-      setTimeout(() => { el.classList.remove("input-error"); el.placeholder = fieldId === "username" ? "Enter your display name" : "Enter or generate a Room ID"; }, 2500);
+      setTimeout(() => el.classList.remove("input-error"), 2200);
     }
-
     document.addEventListener("DOMContentLoaded", () => {
       document.querySelectorAll(".field-input").forEach(el => {
         el.addEventListener("keydown", e => { if (e.key === "Enter") joinRoom(); });
-        el.addEventListener("input",   e => { e.target.classList.remove("input-error"); });
+        el.addEventListener("input",   e => e.target.classList.remove("input-error"));
       });
     });
   </script>

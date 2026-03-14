@@ -2,194 +2,145 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>Linkzo Live · Meeting</title>
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
 </head>
 <body class="meeting-body">
 
-<!-- ════════════════ TOP BAR ════════════════ -->
 <header class="topbar">
   <div class="topbar-left">
-    <div class="tb-brand">
-      <span class="tb-dot"></span>
-      <span class="tb-name">Linkzo Live</span>
-    </div>
-    <div class="tb-room">
-      <i class="fa-solid fa-hashtag"></i>
-      <span id="room-display"></span>
-    </div>
+    <div class="tb-brand"><span class="tb-dot"></span><span class="tb-name">Linkzo Live</span></div>
+    <div class="tb-room"><i class="fa-solid fa-hashtag"></i><span id="room-display"></span></div>
   </div>
   <div class="topbar-center">
     <div class="call-status">
-      <span class="status-dot"></span>
+      <span class="status-dot" id="statusDot"></span>
       <span id="call-duration" class="call-timer">00:00</span>
     </div>
   </div>
   <div class="topbar-right">
-    <div class="tb-participants">
-      <i class="fa-solid fa-users"></i>
-      <span id="participant-count">1</span>
-    </div>
-    <button class="tb-btn" id="btnTogglePanel" onclick="togglePanel()" title="Toggle panel">
-      <i class="fa-solid fa-sidebar"></i>
-    </button>
+    <div class="tb-participants"><i class="fa-solid fa-users"></i><span id="participant-count">1</span></div>
+    <button class="tb-btn" onclick="togglePanel()" title="Toggle panel"><i class="fa-solid fa-table-columns"></i></button>
   </div>
 </header>
 
-<!-- ════════════════ MAIN LAYOUT ════════════════ -->
-<div class="meeting-layout">
+<div class="meeting-layout" id="meetingLayout">
 
-  <!-- VIDEO COLUMN -->
-  <div class="video-col">
+  <div class="video-col" id="videoCol">
 
-    <!-- MAIN VIDEO -->
+    <div class="screen-banner" id="screenBanner" style="display:none">
+      <i class="fa-solid fa-display"></i>
+      <span id="screenBannerText">Screen is being shared</span>
+    </div>
+
     <div class="main-video-wrap" id="mainVideoWrap">
       <video id="mainVideo" autoplay playsinline muted></video>
-      <div class="main-video-overlay">
+      <div class="main-overlay">
         <div id="mainVideoLabel" class="main-label"></div>
         <div class="main-actions">
-          <button class="mv-btn" onclick="toggleFullscreen()" title="Fullscreen">
-            <i class="fa-solid fa-expand"></i>
-          </button>
-          <button class="mv-btn" onclick="togglePiP()" title="Picture in Picture">
-            <i class="fa-solid fa-clone"></i>
-          </button>
+          <button class="mv-btn" onclick="toggleFullscreen()" title="Fullscreen"><i class="fa-solid fa-expand"></i></button>
+          <button class="mv-btn" onclick="togglePiP()" title="Picture in Picture"><i class="fa-solid fa-clone"></i></button>
         </div>
       </div>
     </div>
 
-    <!-- THUMBNAIL STRIP -->
     <div id="video-grid" class="thumb-strip"></div>
-
   </div>
 
-  <!-- SIDE PANEL -->
   <aside id="sidePanel" class="side-panel">
+    <button class="panel-close-btn" onclick="closePanel()"><i class="fa-solid fa-xmark"></i></button>
 
-    <!-- PANEL TABS -->
     <div class="panel-tabs">
       <button class="tab-btn active" id="tab-participants" onclick="switchTab('participants')">
-        <i class="fa-solid fa-users"></i>
-        <span>People</span>
-        <span class="tab-badge" id="badge-participants"></span>
+        <i class="fa-solid fa-users"></i><span>People</span>
+        <span class="tab-badge" id="badge-participants" style="display:none"></span>
       </button>
       <button class="tab-btn" id="tab-group" onclick="switchTab('group')">
-        <i class="fa-solid fa-message"></i>
-        <span>Group</span>
-        <span class="tab-badge" id="badge-group"></span>
+        <i class="fa-solid fa-message"></i><span>Group</span>
+        <span class="tab-badge" id="badge-group" style="display:none"></span>
       </button>
       <button class="tab-btn" id="tab-private" onclick="switchTab('private')">
-        <i class="fa-solid fa-lock"></i>
-        <span>Private</span>
-        <span class="tab-badge" id="badge-private"></span>
+        <i class="fa-solid fa-lock"></i><span>DM</span>
+        <span class="tab-badge" id="badge-private" style="display:none"></span>
       </button>
     </div>
 
-    <!-- PARTICIPANTS TAB -->
     <div class="tab-content active" id="pane-participants">
-      <div class="pane-inner">
-        <div class="pane-title">
-          <span>In this meeting</span>
-          <span class="pane-count" id="pane-count">1</span>
-        </div>
+      <div class="pane-scroll">
+        <div class="pane-header"><span>In this meeting</span><span class="pane-count" id="pane-count">1</span></div>
         <div id="participants-list" class="participants-list"></div>
       </div>
     </div>
 
-    <!-- GROUP CHAT TAB -->
     <div class="tab-content" id="pane-group">
-      <div class="messages-wrap">
-        <div class="chat-date-banner">
-          <span id="group-date-label"></span>
-        </div>
-        <div id="group-messages" class="messages-area"></div>
-      </div>
+      <div class="chat-date-label" id="group-date-label"></div>
+      <div id="group-messages" class="messages-area"></div>
       <div class="chat-composer">
-        <input type="text" id="group-input" class="chat-input" placeholder="Message everyone…" autocomplete="off">
-        <button class="send-btn" onclick="sendGroupMessage()" title="Send">
-          <i class="fa-solid fa-paper-plane"></i>
-        </button>
+        <input type="text" id="group-input" class="chat-input" placeholder="Message everyone…" autocomplete="off" inputmode="text" enterkeyhint="send">
+        <button class="send-btn" onclick="sendGroupMessage()"><i class="fa-solid fa-paper-plane"></i></button>
       </div>
     </div>
 
-    <!-- PRIVATE CHAT TAB -->
     <div class="tab-content" id="pane-private">
-      <div class="pane-inner dm-pane" id="dm-pane">
-        <div class="pane-title">Select someone to message</div>
+      <div id="dm-pane" class="pane-scroll">
+        <div class="pane-header"><span>Send a private message</span></div>
         <div id="dm-user-list" class="dm-user-list"></div>
       </div>
-      <!-- DM CONVERSATION (shown when a user is selected) -->
-      <div class="dm-conversation hidden" id="dm-conversation">
-        <div class="dm-conv-header">
-          <button class="dm-back-btn" onclick="closeDM()">
-            <i class="fa-solid fa-chevron-left"></i>
-          </button>
-          <div class="dm-conv-avatar" id="dm-conv-avatar"></div>
-          <div class="dm-conv-name" id="dm-conv-name"></div>
+      <div id="dm-conversation" class="dm-conversation hidden">
+        <div class="dm-header">
+          <button class="dm-back" onclick="closeDM()"><i class="fa-solid fa-chevron-left"></i></button>
+          <div class="dm-hav" id="dm-conv-avatar"></div>
+          <span class="dm-hname" id="dm-conv-name"></span>
+          <span class="dm-private-tag"><i class="fa-solid fa-lock"></i> Private</span>
         </div>
-        <div class="messages-wrap">
-          <div id="dm-messages" class="messages-area"></div>
-        </div>
+        <div id="dm-messages" class="messages-area"></div>
         <div class="chat-composer">
-          <input type="text" id="dm-input" class="chat-input" placeholder="Send a private message…" autocomplete="off">
-          <button class="send-btn" onclick="sendPrivateMessage()" title="Send">
-            <i class="fa-solid fa-paper-plane"></i>
-          </button>
+          <input type="text" id="dm-input" class="chat-input" placeholder="Private message…" autocomplete="off" inputmode="text" enterkeyhint="send">
+          <button class="send-btn" onclick="sendPrivateMessage()"><i class="fa-solid fa-paper-plane"></i></button>
         </div>
       </div>
     </div>
 
   </aside>
+
+  <div class="panel-backdrop" id="panelBackdrop" onclick="closePanel()"></div>
 </div>
 
-<!-- ════════════════ CONTROLS ════════════════ -->
 <footer class="controls-bar">
-  <div class="controls-group">
-
+  <div class="controls-inner">
     <div class="ctrl-item">
-      <button id="btnMute" class="ctrl-btn" onclick="toggleMute()">
-        <i class="fa-solid fa-microphone"></i>
-      </button>
-      <span class="ctrl-label">Mute</span>
+      <button id="btnMute" class="ctrl-btn" onclick="toggleMute()"><i class="fa-solid fa-microphone"></i></button>
+      <span class="ctrl-label" id="lblMute">Mute</span>
     </div>
-
     <div class="ctrl-item">
-      <button id="btnVideo" class="ctrl-btn" onclick="toggleVideo()">
-        <i class="fa-solid fa-video"></i>
-      </button>
-      <span class="ctrl-label">Camera</span>
+      <button id="btnVideo" class="ctrl-btn" onclick="toggleVideo()"><i class="fa-solid fa-video"></i></button>
+      <span class="ctrl-label" id="lblVideo">Camera</span>
     </div>
-
+    <div class="ctrl-item" id="screenShareItem">
+      <button id="btnScreen" class="ctrl-btn" onclick="toggleScreenShare()"><i class="fa-solid fa-display"></i></button>
+      <span class="ctrl-label" id="lblScreen">Share</span>
+    </div>
     <div class="ctrl-item">
       <button id="btnChat" class="ctrl-btn" onclick="openGroupChat()">
         <i class="fa-solid fa-message"></i>
-        <span class="ctrl-unread" id="ctrl-unread" style="display:none"></span>
+        <span class="ctrl-badge" id="ctrl-unread" style="display:none"></span>
       </button>
       <span class="ctrl-label">Chat</span>
     </div>
-
     <div class="ctrl-item">
-      <button id="btnPeople" class="ctrl-btn" onclick="openPeople()">
-        <i class="fa-solid fa-users"></i>
-      </button>
+      <button class="ctrl-btn" onclick="openPeople()"><i class="fa-solid fa-users"></i></button>
       <span class="ctrl-label">People</span>
     </div>
-
     <div class="ctrl-item">
-      <button class="ctrl-btn end-btn" onclick="endCall()">
-        <i class="fa-solid fa-phone-slash"></i>
-      </button>
+      <button class="ctrl-btn end-btn" onclick="endCall()"><i class="fa-solid fa-phone-slash"></i></button>
       <span class="ctrl-label">Leave</span>
     </div>
-
   </div>
 </footer>
 
-<!-- ════════════════ TOAST ════════════════ -->
 <div id="toast" class="toast"></div>
-
 <script src="/socket.io/socket.io.js"></script>
 <script src="script.js"></script>
 </body>
