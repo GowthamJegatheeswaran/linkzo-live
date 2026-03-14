@@ -54,43 +54,15 @@ io.on("connection", (socket) => {
         const count = io.sockets.adapter.rooms.get(roomId)?.size || 1;
         io.to(roomId).emit("participant-count", count);
 
-// ===== START CALL TIMER WHEN 2 USERS JOIN =====
-if (count === 2 && !roomStartTimes[roomId]) {
+        // Start/sync call timer
+        if (count === 2 && !roomStartTimes[roomId]) {
+            roomStartTimes[roomId] = Date.now();
+            io.to(roomId).emit("call-started", roomStartTimes[roomId]);
+        } else if (roomStartTimes[roomId]) {
+            socket.emit("call-started", roomStartTimes[roomId]);
+        }
 
-    roomStartTimes[roomId] = Date.now();
-
-    io.to(roomId).emit(
-        "call-started",
-        roomStartTimes[roomId]
-    );
-}
-
-// ✅ ADD THIS PART HERE
-// If timer already running and this is NOT the 2nd user,
-// send existing timer to new user
-if (roomStartTimes[roomId] && count > 2) {
-    socket.emit(
-        "call-started",
-        roomStartTimes[roomId]
-    );
-}
-        
-// 🔥 SEND EXISTING MUTE STATES
-        Object.keys(muteStates).forEach((id) => {
-            if (id !== socket.id) {
-                io.to(socket.id).emit("mute-status", id, muteStates[id]);
-            }
-        });
-
-        // 🔥 SEND EXISTING CAMERA STATES
-        Object.keys(cameraStates).forEach((id) => {
-            if (id !== socket.id) {
-                io.to(socket.id).emit("camera-status", id, cameraStates[id]);
-            }
-        });
-
-        // ================= SIGNALING =================
-
+        // ── WebRTC Signaling ─────────────────────────────
         socket.on("offer", (offer, targetId) => {
             const user = users[socket.id];
             if (!user) return;
@@ -123,13 +95,17 @@ if (roomStartTimes[roomId] && count > 2) {
         // ── Private Chat ─────────────────────────────────
         socket.on("private-message", (targetId, message) => {
             const user = users[socket.id];
-            if (!user) return;
-
-            io.to(user.roomId).emit(
-                "chat-message",
-                message,
-                user.username
-            );
+            if (!user || !message?.trim() || !users[targetId]) return;
+            const payload = {
+                senderId:   socket.id,
+                senderName: user.username,
+                message:    message.trim(),
+                time:       Date.now()
+            };
+            // Send to recipient
+            io.to(targetId).emit("private-message", payload);
+            // Echo back to sender so they see their own DM
+            socket.emit("private-message-echo", { ...payload, recipientId: targetId, recipientName: users[targetId].username });
         });
 
         // ── Media States ─────────────────────────────────
@@ -147,8 +123,7 @@ if (roomStartTimes[roomId] && count > 2) {
             socket.to(user.roomId).emit("camera-status", socket.id, isOn);
         });
 
-        // ================= DISCONNECT =================
-
+        // ── Disconnect ───────────────────────────────────
         socket.on("disconnect", () => {
             const user = users[socket.id];
             if (!user) return;

@@ -9,20 +9,28 @@
 </head>
 <body class="meeting-body">
 
-<header class="top-bar">
-    <div class="left-header">
-    <div class="brand">
-    <img src="linkzo-logo.png" class="header-logo" alt="logo">
-    <h2 class="app-title">Linkzo Live</h2>
-</div>
-    <span id="room-display"></span>
-    <span id="call-duration" class="call-duration">00:00</span>
-</div>
-
-    <div class="right-header">
-    <div class="participant-badge">
-        <i class="fa-solid fa-users"></i>
-        <span id="participant-count">1</span>
+<!-- ════════════════ TOP BAR ════════════════ -->
+<header class="topbar">
+  <div class="topbar-left">
+    <div class="tb-brand">
+      <span class="tb-dot"></span>
+      <span class="tb-name">Linkzo Live</span>
+    </div>
+    <div class="tb-room">
+      <i class="fa-solid fa-hashtag"></i>
+      <span id="room-display"></span>
+    </div>
+  </div>
+  <div class="topbar-center">
+    <div class="call-status">
+      <span class="status-dot"></span>
+      <span id="call-duration" class="call-timer">00:00</span>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div class="tb-participants">
+      <i class="fa-solid fa-users"></i>
+      <span id="participant-count">1</span>
     </div>
     <button class="tb-btn" id="btnTogglePanel" onclick="togglePanel()" title="Toggle panel">
       <i class="fa-solid fa-sidebar"></i>
@@ -79,33 +87,31 @@
       </button>
     </div>
 
-    <!-- RIGHT SIDE CHAT PANEL -->
-    <div id="chat-panel" class="chat-panel">
-
-        <div class="participants-panel">
-
-    <div class="participants-header">
-    <span>Participants</span>
-    <span id="participants-count-small"></span>
-</div>
-
-    <div id="participants-list" class="participants-list"></div>
-
-</div>
-        
-       <div class="chat-header">
-    <i class="fa-regular fa-comment-dots"></i>
-    <span>Chat</span>
-</div>
-
-        <div id="messages" class="messages"></div>
-
-        <div class="chat-input">
-            <input type="text" id="chat-message" placeholder="Type a message...">
-            <button class="send-btn" onclick="sendMessage()">
-    <i class="fa-solid fa-paper-plane"></i>
-</button>
+    <!-- PARTICIPANTS TAB -->
+    <div class="tab-content active" id="pane-participants">
+      <div class="pane-inner">
+        <div class="pane-title">
+          <span>In this meeting</span>
+          <span class="pane-count" id="pane-count">1</span>
         </div>
+        <div id="participants-list" class="participants-list"></div>
+      </div>
+    </div>
+
+    <!-- GROUP CHAT TAB -->
+    <div class="tab-content" id="pane-group">
+      <div class="messages-wrap">
+        <div class="chat-date-banner">
+          <span id="group-date-label"></span>
+        </div>
+        <div id="group-messages" class="messages-area"></div>
+      </div>
+      <div class="chat-composer">
+        <input type="text" id="group-input" class="chat-input" placeholder="Message everyone…" autocomplete="off">
+        <button class="send-btn" onclick="sendGroupMessage()" title="Send">
+          <i class="fa-solid fa-paper-plane"></i>
+        </button>
+      </div>
     </div>
 
     <!-- PRIVATE CHAT TAB -->
@@ -152,11 +158,24 @@
     <div class="ctrl-item">
       <button id="btnVideo" class="ctrl-btn" onclick="toggleVideo()">
         <i class="fa-solid fa-video"></i>
-    </button>
+      </button>
+      <span class="ctrl-label">Camera</span>
+    </div>
 
-    <button class="control-btn" onclick="toggleChat()">
-        <i class="fa-regular fa-comment-dots"></i>
-    </button>
+    <div class="ctrl-item">
+      <button id="btnChat" class="ctrl-btn" onclick="openGroupChat()">
+        <i class="fa-solid fa-message"></i>
+        <span class="ctrl-unread" id="ctrl-unread" style="display:none"></span>
+      </button>
+      <span class="ctrl-label">Chat</span>
+    </div>
+
+    <div class="ctrl-item">
+      <button id="btnPeople" class="ctrl-btn" onclick="openPeople()">
+        <i class="fa-solid fa-users"></i>
+      </button>
+      <span class="ctrl-label">People</span>
+    </div>
 
     <div class="ctrl-item">
       <button class="ctrl-btn end-btn" onclick="endCall()">

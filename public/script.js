@@ -33,8 +33,15 @@ let participantCount  = 0;
 let isMuted           = false;
 let isCameraOn        = true;
 let callTimerInterval = null;
+let activeTab         = "participants";
+let activeDMId        = null;        // peerId of current DM partner
+let dmHistory         = {};          // peerId → [{...}]
+let groupUnread       = 0;
+let privateUnread     = 0;
+let panelVisible      = true;
 
-const configuration = {
+/* ── ICE config (multiple STUN + TURN for cross-network) ── */
+const RTC_CONFIG = {
     iceServers: [
         { urls: "stun:stun.l.google.com:19302"  },
         { urls: "stun:stun1.l.google.com:19302" },
@@ -130,19 +137,29 @@ socket.on("answer", async (answer, senderId) => {
     }
 });
 
-    socket.on("ice-candidate", (candidate, userId) => {
-        if (peers[userId]) {
-            peers[userId].addIceCandidate(
-                new RTCIceCandidate(candidate)
-            );
-        }
-    });
+/* ICE candidate */
+socket.on("ice-candidate", (candidate, senderId) => {
+    const peer = peers[senderId];
+    if (peer?.remoteDescription?.type) {
+        peer.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+    } else {
+        if (!pendingCandidates[senderId]) pendingCandidates[senderId] = [];
+        pendingCandidates[senderId].push(candidate);
+    }
+});
 
-    socket.on("chat-message", (message, sender) => {
-        addMessage(sender, message);
-    });
+/* User leaves */
+socket.on("user-disconnected", (userId) => {
+    const name = userNames[userId] || "A participant";
+    closePeerConnection(userId);
+    showToast(`${name} left the meeting`, "leave");
+    renderParticipants();
+    refreshDMList();
+    if (activeDMId === userId) closeDM();
+});
 
-    socket.on("participant-count", (count) => {
+/* Participant count */
+socket.on("participant-count", (count) => {
     participantCount = count;
     document.getElementById("participant-count").textContent = count;
     document.getElementById("pane-count").textContent = count;
@@ -173,37 +190,12 @@ socket.on("mute-status", (userId, muted) => {
     renderParticipants();
 });
 
-    socket.on("camera-status", (userId, isOn) => {
-
-        localCameraStates[userId] = isOn;
-
-        const container = document.getElementById("container-" + userId);
-        if (!container) return;
-
-        const video = document.getElementById(userId);
-        let avatar = document.getElementById("avatar-" + userId);
-
-        if (!isOn) {
-
-            if (!avatar) {
-                avatar = document.createElement("div");
-                avatar.classList.add("avatar");
-                avatar.id = "avatar-" + userId;
-                avatar.innerText =
-                    (userNames[userId]?.charAt(0).toUpperCase()) || "?";
-                container.appendChild(avatar);
-            }
-
-            if (video) video.style.display = "none";
-
-        } else {
-
-            if (video) video.style.display = "block";
-            if (avatar) avatar.remove();
-        }
-
-        renderParticipants();
-    });
+/* Camera state change */
+socket.on("camera-status", (userId, isOn) => {
+    camState[userId] = isOn;
+    applyRemoteCamState(userId, isOn);
+    renderParticipants();
+});
 
 /* Group message */
 socket.on("group-message", (payload) => {
@@ -248,11 +240,8 @@ socket.on("private-message-echo", (payload) => {
 function createPeer(userId) {
     if (peers[userId]) peers[userId].close();
 
-    const peer = new RTCPeerConnection(configuration);
-
-    localStream.getTracks().forEach(track => {
-        peer.addTrack(track, localStream);
-    });
+    const peer = new RTCPeerConnection(RTC_CONFIG);
+    localStream.getTracks().forEach(t => peer.addTrack(t, localStream));
 
     peer.ontrack = ({ streams: [stream] }) => {
         if (!document.getElementById("container-" + userId)) {
@@ -385,81 +374,20 @@ function applyRemoteCamState(userId, isOn) {
         if (video)  video.style.display = "";
         avatar?.remove();
     }
-
-    bottomRow.innerHTML = "";
-
-    allContainers.forEach(container => {
-        if (container.id !== "container-" + id) {
-            container.classList.remove("focused");
-            bottomRow.appendChild(container);
-        }
-    });
 }
 
-function removeFocusMode() {
-
-    focusedId = null;
-    videoGrid.classList.remove("focus-mode");
-
-    const bottomRow = document.querySelector(".bottom-row");
-
-    if (bottomRow) {
-        const children = Array.from(bottomRow.children);
-        children.forEach(child => videoGrid.appendChild(child));
-        bottomRow.remove();
-    }
-
-    document.querySelectorAll(".video-container").forEach(c => {
-        c.classList.remove("focused");
-    });
+function injectAvatar(container, id) {
+    const av = document.createElement("div");
+    av.className = "thumb-avatar";
+    av.id = "avatar-" + id;
+    av.textContent = (id === "local" ? username : userNames[id] || "?")
+                        .charAt(0).toUpperCase();
+    container.appendChild(av);
 }
 
-/* ================= CHAT ================= */
-
-function sendMessage() {
-    const input = document.getElementById("chat-message");
-    if (input.value.trim() !== "") {
-        socket.emit("chat-message", input.value);
-        input.value = "";
-    }
-}
-
-function addMessage(sender, message) {
-
-    const messages = document.getElementById("messages");
-
-    const bubble = document.createElement("div");
-
-    const isMe = sender === username;
-
-    bubble.classList.add("chat-bubble");
-    bubble.classList.add(isMe ? "me" : "other");
-
-    // message wrapper
-    if (isMe) {
-        bubble.innerHTML = `
-            <div class="chat-text">${message}</div>
-        `;
-    } else {
-        bubble.innerHTML = `
-            <div class="chat-name">${sender}</div>
-            <div class="chat-text">${message}</div>
-        `;
-    }
-
-    messages.appendChild(bubble);
-    bubble.style.opacity = "0";
-bubble.style.transform = "translateY(6px)";
-
-setTimeout(() => {
-    bubble.style.transition = "all 0.2s ease";
-    bubble.style.opacity = "1";
-    bubble.style.transform = "translateY(0)";
-}, 10);
-    messages.scrollTop = messages.scrollHeight;
-}
-/* ================= MEDIA CONTROLS ================= */
-
+/* ════════════════════════════════════════════════════
+   CONTROLS
+   ════════════════════════════════════════════════════ */
 function toggleMute() {
     const track = localStream?.getAudioTracks()[0];
     if (!track) return;
@@ -603,42 +531,304 @@ function renderParticipants() {
 
 function appendParticipantRow(id, name) {
     const list = document.getElementById("participants-list");
+    const row  = document.createElement("div");
+    row.className = "p-row";
 
-    const div = document.createElement("div");
-    div.className = "participant-item";
+    const initials = getInitials(name);
+    const micOff   = muteState[id];
+    const camOff   = camState[id] === false;
+    const isLocal  = (id === "local");
 
-    const muteIcon = localMuteStates[id]
-        ? '<i class="fa-solid fa-microphone-slash"></i>'
-        : '<i class="fa-solid fa-microphone"></i>';
-
-    const camIcon = localCameraStates[id] === false
-        ? '<i class="fa-solid fa-video-slash"></i>'
-        : '<i class="fa-solid fa-video"></i>';
-
-    div.innerHTML = `
-        <span class="participant-name">${name}</span>
-        <span class="participant-icons">
-            ${muteIcon} ${camIcon}
+    row.innerHTML = `
+      <div class="p-av" style="background:${avatarColor(name)}">${initials}</div>
+      <div class="p-info">
+        <div class="p-name">${esc(name)}</div>
+        ${isLocal ? '<div class="p-you-tag">You</div>' : ""}
+      </div>
+      <div class="p-status">
+        <span class="p-icon ${micOff ? "off" : ""}" title="${micOff ? "Muted" : "Unmuted"}">
+          <i class="fa-solid ${micOff ? "fa-microphone-slash" : "fa-microphone"}"></i>
         </span>
+        <span class="p-icon ${camOff ? "off" : ""}" title="${camOff ? "Camera off" : "Camera on"}">
+          <i class="fa-solid ${camOff ? "fa-video-slash" : "fa-video"}"></i>
+        </span>
+        ${!isLocal ? `<button class="p-dm-btn" onclick="openDM('${id}')" title="Send DM">
+          <i class="fa-solid fa-message"></i>
+        </button>` : ""}
+      </div>
     `;
-
-    list.appendChild(div);
+    list.appendChild(row);
 }
 
-function startCallTimer() {
-
-    const durationEl = document.getElementById("call-duration");
-
-    callTimerInterval = setInterval(() => {
-
-        callSeconds++;
-
-        const minutes = Math.floor(callSeconds / 60);
-        const seconds = callSeconds % 60;
-
-        durationEl.innerText =
-            `${String(minutes).padStart(2,'0')}:` +
-            `${String(seconds).padStart(2,'0')}`;
-
-    }, 1000);
+/* ════════════════════════════════════════════════════
+   GROUP CHAT
+   ════════════════════════════════════════════════════ */
+function sendGroupMessage() {
+    const input = document.getElementById("group-input");
+    const text  = input.value.trim();
+    if (!text) return;
+    socket.emit("group-message", text);
+    input.value = "";
+    input.focus();
 }
+
+function appendGroupMessage(payload, isMe) {
+    const area = document.getElementById("group-messages");
+    if (!area) return;
+
+    // Time separator if needed
+    maybeInsertTimeSeparator(area, payload.time);
+
+    const wrap = document.createElement("div");
+    wrap.className = "msg-wrap " + (isMe ? "msg-me" : "msg-them");
+
+    if (!isMe) {
+        wrap.innerHTML = `
+          <div class="msg-av" style="background:${avatarColor(payload.senderName)}">${getInitials(payload.senderName)}</div>
+          <div class="msg-body">
+            <div class="msg-sender">${esc(payload.senderName)}</div>
+            <div class="msg-bubble">${esc(payload.message)}</div>
+            <div class="msg-time">${formatTime(payload.time)}</div>
+          </div>
+        `;
+    } else {
+        wrap.innerHTML = `
+          <div class="msg-body">
+            <div class="msg-bubble">${esc(payload.message)}</div>
+            <div class="msg-time">${formatTime(payload.time)}</div>
+          </div>
+        `;
+    }
+
+    area.appendChild(wrap);
+    animateIn(wrap);
+    scrollToBottom("group-messages");
+}
+
+/* ════════════════════════════════════════════════════
+   PRIVATE / DM CHAT
+   ════════════════════════════════════════════════════ */
+function refreshDMList() {
+    const list = document.getElementById("dm-user-list");
+    if (!list) return;
+    list.innerHTML = "";
+
+    Object.keys(userNames).forEach(id => {
+        const name  = userNames[id];
+        const item  = document.createElement("div");
+        item.className = "dm-item";
+        item.onclick   = () => openDM(id);
+        item.innerHTML = `
+          <div class="dm-av" style="background:${avatarColor(name)}">${getInitials(name)}</div>
+          <div class="dm-info">
+            <div class="dm-name">${esc(name)}</div>
+            <div class="dm-hint">Tap to start private chat</div>
+          </div>
+          <i class="fa-solid fa-chevron-right dm-arrow"></i>
+        `;
+        list.appendChild(item);
+    });
+
+    if (list.children.length === 0) {
+        list.innerHTML = `<div class="dm-empty">
+          <i class="fa-solid fa-user-group"></i>
+          <p>No other participants yet</p>
+        </div>`;
+    }
+}
+
+function openDM(userId) {
+    activeDMId = userId;
+    const name = userNames[userId] || "Unknown";
+
+    // Show conversation pane
+    document.getElementById("dm-pane")?.classList.add("hidden");
+    const conv = document.getElementById("dm-conversation");
+    conv?.classList.remove("hidden");
+
+    // Set header
+    document.getElementById("dm-conv-name").textContent = name;
+    document.getElementById("dm-conv-avatar").textContent = getInitials(name);
+    document.getElementById("dm-conv-avatar").style.background = avatarColor(name);
+
+    // Render history
+    const area = document.getElementById("dm-messages");
+    if (area) {
+        area.innerHTML = "";
+        (dmHistory[userId] || []).forEach(m => appendDMMessage(m, m.isMe));
+        if (area.children.length === 0) {
+            area.innerHTML = `<div class="dm-no-msgs">
+              <i class="fa-regular fa-comment-dots"></i>
+              <p>Start the conversation with <strong>${esc(name)}</strong></p>
+            </div>`;
+        }
+    }
+
+    scrollToBottom("dm-messages");
+    document.getElementById("dm-input")?.focus();
+
+    // Switch to private tab
+    switchTab("private");
+    privateUnread = 0;
+    updateUnreadBadges();
+}
+
+function closeDM() {
+    activeDMId = null;
+    document.getElementById("dm-conversation")?.classList.add("hidden");
+    document.getElementById("dm-pane")?.classList.remove("hidden");
+    refreshDMList();
+}
+
+function sendPrivateMessage() {
+    const input = document.getElementById("dm-input");
+    const text  = input.value.trim();
+    if (!text || !activeDMId) return;
+    socket.emit("private-message", activeDMId, text);
+    input.value = "";
+    input.focus();
+
+    // Optimistic local append
+    const payload = { senderName: username, message: text, time: Date.now() };
+    if (!dmHistory[activeDMId]) dmHistory[activeDMId] = [];
+    dmHistory[activeDMId].push({ ...payload, isMe: true });
+    appendDMMessage(payload, true);
+
+    // Clear "no messages" placeholder
+    document.querySelector("#dm-messages .dm-no-msgs")?.remove();
+}
+
+function appendDMMessage(payload, isMe) {
+    const area = document.getElementById("dm-messages");
+    if (!area) return;
+
+    const wrap = document.createElement("div");
+    wrap.className = "msg-wrap " + (isMe ? "msg-me" : "msg-them");
+
+    if (!isMe) {
+        wrap.innerHTML = `
+          <div class="msg-av" style="background:${avatarColor(payload.senderName)}">${getInitials(payload.senderName)}</div>
+          <div class="msg-body">
+            <div class="msg-bubble dm-bubble">${esc(payload.message)}</div>
+            <div class="msg-time">${formatTime(payload.time)}</div>
+          </div>
+        `;
+    } else {
+        wrap.innerHTML = `
+          <div class="msg-body">
+            <div class="msg-bubble dm-bubble">${esc(payload.message)}</div>
+            <div class="msg-time">${formatTime(payload.time)}</div>
+          </div>
+        `;
+    }
+
+    area.appendChild(wrap);
+    animateIn(wrap);
+    scrollToBottom("dm-messages");
+}
+
+/* ════════════════════════════════════════════════════
+   UNREAD BADGES
+   ════════════════════════════════════════════════════ */
+function updateUnreadBadges() {
+    const gb = document.getElementById("badge-group");
+    const pb = document.getElementById("badge-private");
+    const cu = document.getElementById("ctrl-unread");
+
+    if (gb) { gb.textContent = groupUnread || ""; gb.style.display = groupUnread ? "" : "none"; }
+    if (pb) { pb.textContent = privateUnread || ""; pb.style.display = privateUnread ? "" : "none"; }
+
+    const total = groupUnread + privateUnread;
+    if (cu) { cu.textContent = total || ""; cu.style.display = total ? "flex" : "none"; }
+}
+
+/* ════════════════════════════════════════════════════
+   TOAST NOTIFICATIONS
+   ════════════════════════════════════════════════════ */
+let toastTimeout;
+function showToast(msg, type = "info") {
+    const el = document.getElementById("toast");
+    if (!el) return;
+    el.textContent = msg;
+    el.className = `toast toast-${type} toast-show`;
+    if (toastTimeout) clearTimeout(toastTimeout);
+    toastTimeout = setTimeout(() => el.classList.remove("toast-show"), 3500);
+}
+
+/* ════════════════════════════════════════════════════
+   INPUT BINDING
+   ════════════════════════════════════════════════════ */
+function bindInputs() {
+    document.getElementById("group-input")?.addEventListener("keydown", e => {
+        if (e.key === "Enter") { e.preventDefault(); sendGroupMessage(); }
+    });
+    document.getElementById("dm-input")?.addEventListener("keydown", e => {
+        if (e.key === "Enter") { e.preventDefault(); sendPrivateMessage(); }
+    });
+}
+
+/* ════════════════════════════════════════════════════
+   HELPERS
+   ════════════════════════════════════════════════════ */
+function esc(text = "") {
+    return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+function pad(n) { return String(n).padStart(2, "0"); }
+
+function formatTime(ts) {
+    const d = new Date(ts);
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatDate(d) {
+    return d.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
+}
+
+function getInitials(name = "?") {
+    return name.trim().split(/\s+/).map(w => w[0]).join("").substring(0, 2).toUpperCase();
+}
+
+const COLOR_PALETTE = ["#4f8ef7","#7c4dff","#00b894","#e17055","#fdcb6e","#a29bfe","#55efc4","#fd79a8"];
+function avatarColor(name = "") {
+    let hash = 0;
+    for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+    return COLOR_PALETTE[Math.abs(hash) % COLOR_PALETTE.length];
+}
+
+function scrollToBottom(id) {
+    const el = document.getElementById(id);
+    if (el) el.scrollTop = el.scrollHeight;
+}
+
+function animateIn(el) {
+    el.style.opacity = "0";
+    el.style.transform = "translateY(8px)";
+    requestAnimationFrame(() => {
+        el.style.transition = "opacity 0.2s ease, transform 0.2s ease";
+        el.style.opacity = "1";
+        el.style.transform = "translateY(0)";
+    });
+}
+
+let lastSeparatorDate = null;
+function maybeInsertTimeSeparator(area, ts) {
+    const d = new Date(ts);
+    const key = d.toDateString();
+    if (lastSeparatorDate !== key) {
+        lastSeparatorDate = key;
+        const sep = document.createElement("div");
+        sep.className = "time-separator";
+        sep.textContent = formatDate(d);
+        area.appendChild(sep);
+    }
+}
+
+/* ════════════════════════════════════════════════════
+   BOOT
+   ════════════════════════════════════════════════════ */
+init();
