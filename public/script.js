@@ -1,117 +1,134 @@
-const socket = io();
-const videoGrid = document.getElementById("video-grid");
-const roomId = new URLSearchParams(window.location.search).get("room");
-const username = localStorage.getItem("username");
+/* ═══════════════════════════════════════════════════
+   Linkzo Live · script.js
+   ─────────────────────────────────────────────────
+   Features:
+   · WebRTC with ICE candidate queuing
+   · Multiple STUN/TURN for cross-network calls
+   · Group chat (broadcast)
+   · Private / DM chat
+   · Mute / camera toggle with correct icon state
+   · Call duration timer
+   · Toast notifications for join/leave events
+   · Participant panel with live mic/cam status
+   ═══════════════════════════════════════════════════ */
 
-document.getElementById("room-display").innerText = "Room: " + roomId;
+/* ── Socket ────────────────────────────────────────── */
+const socket = io({ transports: ["websocket", "polling"] });
 
-let localStream;
-let peers = {};
-let participantCount = 0;
-let userNames = {};
-let localMuteStates = {};
-let localCameraStates = {};
-let focusedId = null;   // focus state
-let callSeconds = 0;
+/* ── Room & identity ───────────────────────────────── */
+const roomId   = decodeURIComponent(new URLSearchParams(window.location.search).get("room") || "");
+const username = localStorage.getItem("username") || "Guest";
+
+document.getElementById("room-display").textContent = roomId;
+document.getElementById("group-date-label").textContent = formatDate(new Date());
+
+/* ── State ─────────────────────────────────────────── */
+let localStream       = null;
+let peers             = {};          // peerId → RTCPeerConnection
+let pendingCandidates = {};          // peerId → RTCIceCandidate[]
+let userNames         = {};          // peerId → displayName
+let muteState         = {};          // peerId → bool (isMuted)
+let camState          = {};          // peerId → bool (cameraOn)
+let participantCount  = 0;
+let isMuted           = false;
+let isCameraOn        = true;
 let callTimerInterval = null;
-let isScreenSharing = false;
-let screenStream = null;
-let privateChatUserId = null;
-let privateChatUserName = null;
-let chatHistory = {
-    group: [],
-    private: {}
-};
-
-let unreadPrivateMessages = {};
 
 const configuration = {
     iceServers: [
-        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun.l.google.com:19302"  },
+        { urls: "stun:stun1.l.google.com:19302" },
+        { urls: "stun:stun2.l.google.com:19302" },
+        { urls: "stun:stun3.l.google.com:19302" },
         {
-            urls: "turn:openrelay.metered.ca:80",
-            username: "openrelayproject",
+            urls: [
+                "turn:openrelay.metered.ca:80",
+                "turn:openrelay.metered.ca:443",
+                "turns:openrelay.metered.ca:443"
+            ],
+            username:   "openrelayproject",
             credential: "openrelayproject"
         }
-    ]
+    ],
+    iceTransportPolicy: "all",
+    bundlePolicy:       "max-bundle",
+    rtcpMuxPolicy:      "require"
 };
 
+/* ════════════════════════════════════════════════════
+   INIT
+   ════════════════════════════════════════════════════ */
 async function init() {
-
-    localStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true
-    });
-
-    addVideoStream(localStream, "local", username);
-    updateParticipantCount();
-    renderParticipants();
-
-    socket.emit("join-room", roomId, username);
-
-    document.getElementById("chat-message")
-        .addEventListener("keydown", function (event) {
-            if (event.key === "Enter") {
-                event.preventDefault();
-                sendMessage();
-            }
+    try {
+        localStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+            audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 48000 }
         });
-
-        document.getElementById("messages").style.scrollBehavior = "smooth";
-
-    socket.on("user-connected", (userId, remoteName) => {
-
-    userNames[userId] = remoteName;
-
-    // ✅ Only ONE side creates offer
-    if (socket.id < userId) {
-        connectToNewUser(userId);
+    } catch (_) {
+        try {
+            localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        } catch (err) {
+            showToast("Cannot access camera/microphone. Check permissions.", "error");
+            return;
+        }
     }
 
-    renderParticipants();
-});
-socket.on("existing-users", (users) => {
-
-    users.forEach(user => {
-
-        // ✅ save username FIRST
-        userNames[user.id] = user.username;
-
-        // ✅ only one side creates offer
-        if (socket.id < user.id) {
-            connectToNewUser(user.id);
-        }
-
-    });
-
-    renderParticipants();
-});
-
-    socket.on("offer", async (offer, userId, remoteName) => {
-
-        userNames[userId] = remoteName;
-
-        let peer = peers[userId];
-
-if (!peer) {
-    peer = createPeerConnection(userId);
+    addVideoStream(localStream, "local", username);
+    socket.emit("join-room", roomId, username);
+    bindInputs();
 }
 
-        await peer.setRemoteDescription(new RTCSessionDescription(offer));
+/* ════════════════════════════════════════════════════
+   SOCKET EVENTS
+   ════════════════════════════════════════════════════ */
 
+/* Existing users when we join */
+socket.on("existing-users", (users) => {
+    users.forEach(u => {
+        userNames[u.id]  = u.username;
+        muteState[u.id]  = u.isMuted;
+        camState[u.id]   = u.cameraOn;
+        if (socket.id < u.id) connectToUser(u.id);
+    });
+    renderParticipants();
+    refreshDMList();
+});
+
+/* New user joins */
+socket.on("user-connected", (userId, name) => {
+    userNames[userId] = name;
+    if (socket.id < userId) connectToUser(userId);
+    showToast(`${name} joined the meeting`, "join");
+    renderParticipants();
+    refreshDMList();
+});
+
+/* WebRTC offer */
+socket.on("offer", async (offer, senderId, senderName) => {
+    userNames[senderId] = senderName;
+    let peer = peers[senderId] || createPeer(senderId);
+    try {
+        await peer.setRemoteDescription(new RTCSessionDescription(offer));
+        flushCandidates(senderId);
         const answer = await peer.createAnswer();
         await peer.setLocalDescription(answer);
+        socket.emit("answer", answer, senderId);
+    } catch (e) {
+        console.warn("[offer]", e);
+    }
+});
 
-        socket.emit("answer", answer, userId);
-    });
-
-    socket.on("answer", async (answer, userId) => {
-        if (peers[userId]) {
-            await peers[userId].setRemoteDescription(
-                new RTCSessionDescription(answer)
-            );
-        }
-    });
+/* WebRTC answer */
+socket.on("answer", async (answer, senderId) => {
+    const peer = peers[senderId];
+    if (!peer || peer.signalingState !== "have-local-offer") return;
+    try {
+        await peer.setRemoteDescription(new RTCSessionDescription(answer));
+        flushCandidates(senderId);
+    } catch (e) {
+        console.warn("[answer]", e);
+    }
+});
 
     socket.on("ice-candidate", (candidate, userId) => {
         if (peers[userId]) {
@@ -122,77 +139,39 @@ if (!peer) {
     });
 
     socket.on("chat-message", (message, sender) => {
-
-    // avoid duplicate for sender
-    if (sender === username) return;
-
-    chatHistory.group.push({ sender, message });
-
-    if (!privateChatUserId) {
         addMessage(sender, message);
-    }
-});
-
-    socket.on("private-message", (message, sender, senderId) => {
-
-    if (!chatHistory.private[senderId]) {
-        chatHistory.private[senderId] = [];
-    }
-
-    chatHistory.private[senderId].push({
-        sender,
-        message
     });
-
-    // ✅ if chat is OPEN → show message only
-    if (privateChatUserId === senderId) {
-        addMessage(sender + " (Private)", message);
-        return;
-    }
-
-    // ✅ otherwise increase unread count
-    unreadPrivateMessages[senderId] =
-        (unreadPrivateMessages[senderId] || 0) + 1;
-
-    updateParticipantNotification(senderId);
-});
 
     socket.on("participant-count", (count) => {
     participantCount = count;
-    updateParticipantCount();
+    document.getElementById("participant-count").textContent = count;
+    document.getElementById("pane-count").textContent = count;
 });
 
+/* Call timer sync */
 socket.on("call-started", (startTime) => {
-
-    // stop old timer if running
-    if (callTimerInterval) {
-        clearInterval(callTimerInterval);
-    }
-
-    const durationEl = document.getElementById("call-duration");
-
+    if (callTimerInterval) clearInterval(callTimerInterval);
+    const el = document.getElementById("call-duration");
     callTimerInterval = setInterval(() => {
-
-        const elapsedSeconds =
-            Math.floor((Date.now() - startTime) / 1000);
-
-        const minutes = Math.floor(elapsedSeconds / 60);
-        const seconds = elapsedSeconds % 60;
-
-        durationEl.innerText =
-            `${String(minutes).padStart(2,'0')}:` +
-            `${String(seconds).padStart(2,'0')}`;
-
+        const total = Math.floor((Date.now() - startTime) / 1000);
+        const h = Math.floor(total / 3600);
+        const m = Math.floor((total % 3600) / 60);
+        const s = total % 60;
+        el.textContent = h > 0
+            ? `${pad(h)}:${pad(m)}:${pad(s)}`
+            : `${pad(m)}:${pad(s)}`;
     }, 1000);
+    // Show the status dot as green/active
+    document.querySelector(".status-dot")?.classList.add("active");
 });
 
-    socket.on("mute-status", (userId, isMuted) => {
-        localMuteStates[userId] = isMuted;
-
-        const icon = document.getElementById("mute-" + userId);
-        if (icon) icon.style.display = isMuted ? "block" : "none";
-        renderParticipants();
-    });
+/* Mute state change */
+socket.on("mute-status", (userId, muted) => {
+    muteState[userId] = muted;
+    const icon = document.getElementById("mute-icon-" + userId);
+    if (icon) icon.style.display = muted ? "flex" : "none";
+    renderParticipants();
+});
 
     socket.on("camera-status", (userId, isOn) => {
 
@@ -226,102 +205,71 @@ socket.on("call-started", (startTime) => {
         renderParticipants();
     });
 
-    socket.on("screen-share-status", (userId, isSharing) => {
-
-    const mainVideo = document.getElementById("mainVideo");
-    const mainLabel = document.getElementById("mainVideoLabel");
-
-    if (!mainVideo || !mainLabel) return;
-
-    // check which stream is currently shown as main video
-    const currentVideo = document.getElementById(userId);
-
-    if (!currentVideo) return;
-
-    // if that user's video is currently focused
-    if (mainVideo.srcObject === currentVideo.srcObject) {
-
-        if (isSharing) {
-            mainLabel.innerText =
-                `${userNames[userId] || "Participant"} - Screen`;
-
-            // screen should not be mirrored
-            mainVideo.classList.remove("local-video");
-
-        } else {
-            mainLabel.innerText =
-                userNames[userId] || "Participant";
+/* Group message */
+socket.on("group-message", (payload) => {
+    const isMe = (payload.senderId === socket.id);
+    appendGroupMessage(payload, isMe);
+    if (!isMe) {
+        if (activeTab !== "group" || !panelVisible) {
+            groupUnread++;
+            updateUnreadBadges();
         }
     }
 });
 
-    socket.on("user-disconnected", (userId) => {
+/* Private message received */
+socket.on("private-message", (payload) => {
+    const senderId = payload.senderId;
+    if (!dmHistory[senderId]) dmHistory[senderId] = [];
+    dmHistory[senderId].push({ ...payload, isMe: false });
 
-        if (peers[userId]) {
-            peers[userId].close();
-            delete peers[userId];
-        }
-
-        const container = document.getElementById("container-" + userId);
-        if (container) container.remove();
-
-        delete userNames[userId];
-        delete localMuteStates[userId];
-        delete localCameraStates[userId];
-
-        if (focusedId === userId) {
-            removeFocusMode();
-        }
-        renderParticipants();
-    });
-
-    document.getElementById("mainVideo")
-.addEventListener("leavepictureinpicture", () => {
-
-    document.querySelector(".video-area").style.opacity = "1";
-    document.querySelector(".chat-panel").style.opacity = "1";
-    document.querySelector(".top-bar").style.opacity = "1";
-    document.querySelector(".controls").style.opacity = "1";
-
-});
-document.addEventListener("fullscreenchange", () => {
-
-    const videoStrip = document.querySelector(".video-strip");
-    const controls = document.querySelector(".controls");
-    const header = document.querySelector(".top-bar");
-
-    // if exited fullscreen
-    if (!document.fullscreenElement) {
-        videoStrip.style.display = "flex";
-        controls.style.display = "flex";
-        header.style.display = "flex";
+    if (activeDMId === senderId && activeTab === "private" && panelVisible) {
+        appendDMMessage(payload, false);
+    } else {
+        privateUnread++;
+        updateUnreadBadges();
+        showToast(`💬 ${payload.senderName}: ${payload.message.substring(0, 50)}`, "dm");
     }
 });
-}
 
-function createPeerConnection(userId) {
+/* Echo of our own private message */
+socket.on("private-message-echo", (payload) => {
+    const rid = payload.recipientId;
+    if (!dmHistory[rid]) dmHistory[rid] = [];
+    dmHistory[rid].push({ ...payload, isMe: true });
+    if (activeDMId === rid && activeTab === "private" && panelVisible) {
+        appendDMMessage({ ...payload, senderName: "You" }, true);
+    }
+});
+
+/* ════════════════════════════════════════════════════
+   PEER CONNECTIONS
+   ════════════════════════════════════════════════════ */
+function createPeer(userId) {
+    if (peers[userId]) peers[userId].close();
 
     const peer = new RTCPeerConnection(configuration);
 
-    const streamToSend = isScreenSharing ? screenStream : localStream;
+    localStream.getTracks().forEach(track => {
+        peer.addTrack(track, localStream);
+    });
 
-streamToSend.getTracks().forEach(track => {
-    peer.addTrack(track, streamToSend);
-});
+    peer.ontrack = ({ streams: [stream] }) => {
+        if (!document.getElementById("container-" + userId)) {
+            addVideoStream(stream, userId, userNames[userId] || "Participant");
+        } else {
+            const v = document.getElementById(userId);
+            if (v && v.srcObject !== stream) v.srcObject = stream;
+        }
+    };
 
-    peer.ontrack = (event) => {
+    peer.onicecandidate = ({ candidate }) => {
+        if (candidate) socket.emit("ice-candidate", candidate, userId);
+    };
 
-    const remoteStream = event.streams[0];
-    const remoteName = userNames[userId] || "Participant";
-
-    if (!document.getElementById("container-" + userId)) {
-        addVideoStream(remoteStream, userId, remoteName);
-    }
-};
-
-    peer.onicecandidate = (event) => {
-        if (event.candidate) {
-            socket.emit("ice-candidate", event.candidate, userId);
+    peer.onconnectionstatechange = () => {
+        if (peer.connectionState === "failed" && socket.id < userId) {
+            peer.restartIce();
         }
     };
 
@@ -329,164 +277,113 @@ streamToSend.getTracks().forEach(track => {
     return peer;
 }
 
-async function connectToNewUser(userId) {
-
-    const peer = createPeerConnection(userId);
-
-    const offer = await peer.createOffer();
+async function connectToUser(userId) {
+    const peer  = createPeer(userId);
+    const offer = await peer.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
     await peer.setLocalDescription(offer);
-
     socket.emit("offer", offer, userId);
 }
 
-function addVideoStream(stream, id, name) {
+function flushCandidates(userId) {
+    (pendingCandidates[userId] || []).forEach(c =>
+        peers[userId]?.addIceCandidate(new RTCIceCandidate(c)).catch(() => {})
+    );
+    delete pendingCandidates[userId];
+}
 
+function closePeerConnection(userId) {
+    peers[userId]?.close();
+    delete peers[userId];
+    delete pendingCandidates[userId];
+    delete userNames[userId];
+    delete muteState[userId];
+    delete camState[userId];
+    document.getElementById("container-" + userId)?.remove();
+
+    // Revert main video to local if it was showing this user
+    const mv = document.getElementById("mainVideo");
+    if (mv && !document.getElementById(userId)) {
+        mv.srcObject = localStream;
+        mv.muted = true;
+        mv.classList.add("mirror");
+        document.getElementById("mainVideoLabel").textContent = `You (${username})`;
+    }
+}
+
+/* ════════════════════════════════════════════════════
+   VIDEO UI
+   ════════════════════════════════════════════════════ */
+function addVideoStream(stream, id, name) {
     if (document.getElementById("container-" + id)) return;
 
-    const container = document.createElement("div");
-    container.classList.add("video-container");
-    container.id = "container-" + id;
-
-    container.addEventListener("click", () => toggleFocus(id));
+    const wrap  = document.getElementById("video-grid");
+    const outer = document.createElement("div");
+    outer.className = "thumb-card";
+    outer.id = "container-" + id;
+    outer.title = "Click to spotlight";
+    outer.onclick = () => spotlightVideo(id, stream, id === "local" ? `You (${username})` : name);
 
     const video = document.createElement("video");
-video.srcObject = stream;
-video.autoplay = true;
-video.playsInline = true;
-video.setAttribute("playsinline", "");
-video.controls = false;
-video.id = id;
+    video.srcObject  = stream;
+    video.autoplay   = true;
+    video.playsInline = true;
+    video.muted      = (id === "local");
+    video.id         = id;
+    video.onloadedmetadata = () => video.play().catch(() => {});
+    if (id === "local") video.classList.add("mirror");
 
-/* IMPORTANT FIX */
-if (id === "local") {
-    video.muted = true;   // prevent echo
-} else {
-    video.muted = false;  // allow remote audio
-}
+    const labelEl = document.createElement("div");
+    labelEl.className = "thumb-name";
+    labelEl.id = "label-" + id;
+    labelEl.textContent = id === "local" ? `You (${username})` : name;
 
-video.onloadedmetadata = () => {
-    video.play().catch(err => {
-        console.log("Video play blocked:", err);
-    });
-};
+    const muteEl = document.createElement("div");
+    muteEl.className = "thumb-mute-icon";
+    muteEl.id = "mute-icon-" + id;
+    muteEl.innerHTML = '<i class="fa-solid fa-microphone-slash"></i>';
+    muteEl.style.display = (muteState[id] ? "flex" : "none");
 
-if (id === "local") {
-    video.classList.add("local-video");
-}
+    outer.append(video, labelEl, muteEl);
+    wrap.appendChild(outer);
 
-/* FIX ECHO FOR LOCAL USER */
-
-
-    const label = document.createElement("div");
-    label.classList.add("video-label");
-    label.innerText = id === "local" ? `You (${username})` : name;
-
-    const muteIcon = document.createElement("div");
-    muteIcon.classList.add("mute-icon");
-    muteIcon.innerHTML = '<i class="fa-solid fa-microphone-slash"></i>';
-    muteIcon.id = "mute-" + id;
-    muteIcon.style.display = localMuteStates[id] ? "block" : "none";
-
-    container.appendChild(video);
-    container.appendChild(label);
-    container.appendChild(muteIcon);
-
-    videoGrid.appendChild(container);
-
-    /* ===== UI ONLY: set first video as main video ===== */
-
-const mainVideo = document.getElementById("mainVideo");
-
-if (mainVideo && !mainVideo.srcObject) {
-    mainVideo.srcObject = stream;
-
-    // ✅ SET MAIN VIDEO NAME
-    const mainLabel = document.getElementById("mainVideoLabel");
-    if (mainLabel) {
-        mainLabel.innerText =
-            id === "local"
-                ? `You (${username})`
-                : name;
+    // Spotlight: set as main video (prefer remote)
+    const mv = document.getElementById("mainVideo");
+    if (mv && (!mv.srcObject || id !== "local")) {
+        spotlightVideo(id, stream, id === "local" ? `You (${username})` : name);
     }
 
-    if (id === "local") {
-        mainVideo.classList.add("local-video");
-    } else {
-        mainVideo.classList.remove("local-video");
-    }
-}
-    // 🔥 VERY IMPORTANT FIX
-    // Apply stored camera state AFTER video is added
-
-    if (localCameraStates[id] === false) {
-
+    // If camera already known to be off, show avatar
+    if (camState[id] === false) {
         video.style.display = "none";
-
-        const avatar = document.createElement("div");
-        avatar.classList.add("avatar");
-        avatar.id = "avatar-" + id;
-        avatar.innerText =
-            id === "local"
-                ? username.charAt(0).toUpperCase()
-                : (userNames[id]?.charAt(0).toUpperCase() || "?");
-
-        container.appendChild(avatar);
+        injectAvatar(outer, id);
     }
 }
 
-/* ================= FOCUS MODE ================= */
+function spotlightVideo(id, stream, label) {
+    const mv = document.getElementById("mainVideo");
+    const ml = document.getElementById("mainVideoLabel");
+    if (!mv || !stream) return;
+    mv.srcObject = stream;
+    mv.muted = (id === "local");
+    id === "local" ? mv.classList.add("mirror") : mv.classList.remove("mirror");
+    if (ml) ml.textContent = label;
 
-function toggleFocus(id) {
-
-    /* ===== UI ONLY: change main video ===== */
-
-const mainVideo = document.getElementById("mainVideo");
-const clickedVideo = document.getElementById(id);
-
-if (mainVideo && clickedVideo && clickedVideo.srcObject) {
-
-    mainVideo.srcObject = clickedVideo.srcObject;
-
-    // ✅ UPDATE MAIN VIDEO LABEL
-const mainLabel = document.getElementById("mainVideoLabel");
-
-if (mainLabel) {
-    mainLabel.innerText =
-        id === "local"
-            ? `You (${username})`
-            : (userNames[id] || "Participant");
+    // Highlight the active thumb
+    document.querySelectorAll(".thumb-card").forEach(c => c.classList.remove("spotlit"));
+    document.getElementById("container-" + id)?.classList.add("spotlit");
 }
-    // ✅ mirror only when local video is main
-    if (id === "local") {
-        mainVideo.classList.add("local-video");
+
+function applyRemoteCamState(userId, isOn) {
+    const cont   = document.getElementById("container-" + userId);
+    const video  = document.getElementById(userId);
+    const avatar = document.getElementById("avatar-" + userId);
+    if (!cont) return;
+    if (!isOn) {
+        if (video)  video.style.display = "none";
+        if (!avatar) injectAvatar(cont, userId);
     } else {
-        mainVideo.classList.remove("local-video");
-    }
-}
-    if (focusedId === id) {
-        removeFocusMode();
-        return;
-    }
-
-    focusedId = id;
-    videoGrid.classList.add("focus-mode");
-
-    const allContainers = Array.from(document.querySelectorAll(".video-container"));
-
-    const focusedContainer = document.getElementById("container-" + id);
-    if (!focusedContainer) return;
-
-    focusedContainer.classList.add("focused");
-
-    // Move focused video to top
-    videoGrid.prepend(focusedContainer);
-
-    // Create bottom row
-    let bottomRow = document.querySelector(".bottom-row");
-    if (!bottomRow) {
-        bottomRow = document.createElement("div");
-        bottomRow.classList.add("bottom-row");
-        videoGrid.appendChild(bottomRow);
+        if (video)  video.style.display = "";
+        avatar?.remove();
     }
 
     bottomRow.innerHTML = "";
@@ -520,45 +417,11 @@ function removeFocusMode() {
 /* ================= CHAT ================= */
 
 function sendMessage() {
-
     const input = document.getElementById("chat-message");
-    if (input.value.trim() === "") return;
-
-    // PRIVATE MESSAGE
-   if (privateChatUserId) {
-
-    // store locally immediately
-    if (!chatHistory.private[privateChatUserId]) {
-        chatHistory.private[privateChatUserId] = [];
+    if (input.value.trim() !== "") {
+        socket.emit("chat-message", input.value);
+        input.value = "";
     }
-
-    chatHistory.private[privateChatUserId].push({
-        sender: username,
-        message: input.value
-    });
-
-    addMessage(username, input.value);
-
-    socket.emit("private-message", {
-        message: input.value,
-        targetId: privateChatUserId
-    });
-}
-    // GROUP MESSAGE
-    else {
-
-    // store locally first
-    chatHistory.group.push({
-        sender: username,
-        message: input.value
-    });
-
-    addMessage(username, input.value);
-
-    socket.emit("chat-message", input.value);
-}
-
-    input.value = "";
 }
 
 function addMessage(sender, message) {
@@ -593,197 +456,156 @@ setTimeout(() => {
     bubble.style.opacity = "1";
     bubble.style.transform = "translateY(0)";
 }, 10);
-    const isNearBottom =
-    messages.scrollHeight - messages.scrollTop - messages.clientHeight < 50;
-
-if (isNearBottom) {
     messages.scrollTop = messages.scrollHeight;
-}
 }
 /* ================= MEDIA CONTROLS ================= */
 
 function toggleMute() {
+    const track = localStream?.getAudioTracks()[0];
+    if (!track) return;
+    isMuted = !isMuted;
+    track.enabled = !isMuted;
+    muteState["local"] = isMuted;
 
-    const audioTrack = localStream.getAudioTracks()[0];
-    audioTrack.enabled = !audioTrack.enabled;
+    const btn  = document.getElementById("btnMute");
+    const icon = btn?.querySelector("i");
+    if (icon) icon.className = isMuted
+        ? "fa-solid fa-microphone-slash"
+        : "fa-solid fa-microphone";
+    btn?.classList.toggle("ctrl-off", isMuted);
+    document.querySelector(".ctrl-item:nth-child(1) .ctrl-label").textContent =
+        isMuted ? "Unmute" : "Mute";
 
-    const isMuted = !audioTrack.enabled;
-    localMuteStates["local"] = isMuted;
-
-    const icon = document.getElementById("mute-local");
-    if (icon) icon.style.display = isMuted ? "block" : "none";
+    const thumbMute = document.getElementById("mute-icon-local");
+    if (thumbMute) thumbMute.style.display = isMuted ? "flex" : "none";
 
     socket.emit("mute-status", isMuted);
-
     renderParticipants();
 }
 
 function toggleVideo() {
+    const track = localStream?.getVideoTracks()[0];
+    if (!track) return;
+    isCameraOn = !isCameraOn;
+    track.enabled = isCameraOn;
+    camState["local"] = isCameraOn;
 
-    const videoTrack = localStream.getVideoTracks()[0];
-    videoTrack.enabled = !videoTrack.enabled;
+    const btn  = document.getElementById("btnVideo");
+    const icon = btn?.querySelector("i");
+    if (icon) icon.className = isCameraOn
+        ? "fa-solid fa-video"
+        : "fa-solid fa-video-slash";
+    btn?.classList.toggle("ctrl-off", !isCameraOn);
+    document.querySelector(".ctrl-item:nth-child(2) .ctrl-label").textContent =
+        isCameraOn ? "Camera" : "Start Cam";
 
-    const isOn = videoTrack.enabled;
-
-    localCameraStates["local"] = isOn;
-
-    const container = document.getElementById("container-local");
-    const video = document.getElementById("local");
-    let avatar = document.getElementById("avatar-local");
-
-    if (!isOn) {
-
-        // 🔥 Hide video
+    const cont   = document.getElementById("container-local");
+    const video  = document.getElementById("local");
+    const avatar = document.getElementById("avatar-local");
+    if (!isCameraOn) {
         if (video) video.style.display = "none";
-
-        // 🔥 Show avatar if not exists
-        if (!avatar) {
-            avatar = document.createElement("div");
-            avatar.classList.add("avatar");
-            avatar.id = "avatar-local";
-            avatar.innerText = username.charAt(0).toUpperCase();
-            container.appendChild(avatar);
-        }
-
+        if (!avatar && cont) injectAvatar(cont, "local");
     } else {
-
-        // 🔥 Show video again
-        if (video) video.style.display = "block";
-
-        // 🔥 Remove avatar
-        if (avatar) avatar.remove();
+        if (video) video.style.display = "";
+        avatar?.remove();
     }
 
-    // 🔥 Inform others
-    socket.emit("camera-status", isOn);
-
+    socket.emit("camera-status", isCameraOn);
     renderParticipants();
 }
 
-
-function toggleChat() {
-    const chat = document.getElementById("chat-panel");
-    chat.classList.toggle("hidden");
+function togglePanel() {
+    panelVisible = !panelVisible;
+    const panel = document.getElementById("sidePanel");
+    panel?.classList.toggle("panel-hidden", !panelVisible);
 }
 
-function updateParticipantCount() {
-    const counter = document.getElementById("participant-count");
-    if (counter) {
-        counter.innerText = "Participants: " + participantCount;
-    }
+function openGroupChat() {
+    panelVisible = true;
+    document.getElementById("sidePanel")?.classList.remove("panel-hidden");
+    switchTab("group");
 }
 
-function endCall() {
-
-    const confirmEnd = confirm("Are you sure you want to leave the meeting?");
-    if (!confirmEnd) return;
-
-    localStream.getTracks().forEach(track => track.stop());
-    Object.values(peers).forEach(peer => peer.close());
-
-    clearInterval(callTimerInterval);
-    window.location.href = "/";
+function openPeople() {
+    panelVisible = true;
+    document.getElementById("sidePanel")?.classList.remove("panel-hidden");
+    switchTab("participants");
 }
-init();
 
-/* ================= FULLSCREEN ================= */
-
-
+/* ════════════════════════════════════════════════════
+   FULLSCREEN / PiP
+   ════════════════════════════════════════════════════ */
 function toggleFullscreen() {
-
-    const mainVideoBox = document.querySelector(".main-video");
-    const videoStrip = document.querySelector(".video-strip");
-    const controls = document.querySelector(".controls");
-    const header = document.querySelector(".top-bar");
-
-    if (!document.fullscreenElement) {
-
-        mainVideoBox.requestFullscreen();
-
-        // hide UI
-        videoStrip.style.display = "none";
-        controls.style.display = "none";
-        header.style.display = "none";
-
-    } else {
-
-        document.exitFullscreen();
-
-        // show UI again
-        videoStrip.style.display = "flex";
-        controls.style.display = "flex";
-        header.style.display = "flex";
-    }
+    const wrap = document.getElementById("mainVideoWrap");
+    if (!document.fullscreenElement) wrap?.requestFullscreen();
+    else document.exitFullscreen();
 }
 
 async function togglePiP() {
-
     const video = document.getElementById("mainVideo");
-    const videoArea = document.querySelector(".video-area");
-    const chatPanel = document.querySelector(".chat-panel");
-    const header = document.querySelector(".top-bar");
-    const controls = document.querySelector(".controls");
-
     try {
-
-        // EXIT PiP
-        if (document.pictureInPictureElement) {
-
-            await document.exitPictureInPicture();
-
-            videoArea.style.opacity = "1";
-            chatPanel.style.opacity = "1";
-            header.style.opacity = "1";
-            controls.style.opacity = "1";
-        }
-
-        // ENTER PiP
+        if (document.pictureInPictureElement) await document.exitPictureInPicture();
         else {
-
-            // IMPORTANT
-            if (document.fullscreenElement) {
-                await document.exitFullscreen();
-            }
-
+            if (document.fullscreenElement) await document.exitFullscreen();
             await video.requestPictureInPicture();
-
-            videoArea.style.opacity = "1";
-            chatPanel.style.opacity = "1";
-            header.style.opacity = "1";
-            controls.style.opacity = "1";
         }
-
-    } catch (err) {
-        console.log("PiP error:", err);
-    }
+    } catch (e) { console.warn("PiP:", e); }
 }
 
-function renderParticipants() {
+/* ════════════════════════════════════════════════════
+   END CALL
+   ════════════════════════════════════════════════════ */
+function endCall() {
+    if (!confirm("Leave this meeting?")) return;
+    localStream?.getTracks().forEach(t => t.stop());
+    Object.values(peers).forEach(p => p.close());
+    if (callTimerInterval) clearInterval(callTimerInterval);
+    socket.disconnect();
+    window.location.href = "/";
+}
 
+/* ════════════════════════════════════════════════════
+   PANEL TABS
+   ════════════════════════════════════════════════════ */
+function switchTab(tab) {
+    activeTab = tab;
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".tab-content").forEach(p => p.classList.remove("active"));
+    document.getElementById("tab-" + tab)?.classList.add("active");
+    document.getElementById("pane-" + tab)?.classList.add("active");
+
+    if (tab === "group") {
+        groupUnread = 0;
+        updateUnreadBadges();
+        scrollToBottom("group-messages");
+    }
+    if (tab === "private") {
+        privateUnread = 0;
+        updateUnreadBadges();
+    }
+    if (tab === "participants") renderParticipants();
+}
+
+/* ════════════════════════════════════════════════════
+   PARTICIPANTS
+   ════════════════════════════════════════════════════ */
+function renderParticipants() {
     const list = document.getElementById("participants-list");
     if (!list) return;
-
     list.innerHTML = "";
 
-    // LOCAL USER
-    addParticipantItem(
-        "local",
-        `You (${username})`
-    );
+    // Local user
+    appendParticipantRow("local", `You (${username})`);
 
-    // REMOTE USERS
-    Object.keys(userNames).forEach(id => {
-        addParticipantItem(id, userNames[id]);
-    });
+    // Remote users
+    Object.keys(userNames).forEach(id => appendParticipantRow(id, userNames[id]));
 }
 
-function addParticipantItem(id, name) {
-
+function appendParticipantRow(id, name) {
     const list = document.getElementById("participants-list");
 
     const div = document.createElement("div");
     div.className = "participant-item";
-div.setAttribute("data-user", id);
 
     const muteIcon = localMuteStates[id]
         ? '<i class="fa-solid fa-microphone-slash"></i>'
@@ -799,31 +621,6 @@ div.setAttribute("data-user", id);
             ${muteIcon} ${camIcon}
         </span>
     `;
-
-    // ===== OPEN PRIVATE CHAT WHEN CLICKED =====
-div.onclick = () => {
-
-    // ❌ do not allow private chat with yourself
-    if (id === "local") {
-        switchToGroupChat();
-        return;
-    }
-
-    // ✅ OPEN PRIVATE CHAT FIRST
-    privateChatUserId = id;
-    privateChatUserName = name;
-
-    document.getElementById("chatTitle").innerText =
-        "Chat with " + name + " 🔒";
-
-    document.getElementById("backToGroupBtn").style.display = "inline-block";
-
-    loadChatMessages();
-
-    // ✅ RESET BADGE ONLY AFTER CHAT OPENED
-    unreadPrivateMessages[id] = 0;
-    updateParticipantNotification(id);
-};
 
     list.appendChild(div);
 }
@@ -844,152 +641,4 @@ function startCallTimer() {
             `${String(seconds).padStart(2,'0')}`;
 
     }, 1000);
-}
-
-async function toggleScreenShare() {
-
-    try {
-
-        // ===== START SCREEN SHARE =====
-        if (!isScreenSharing) {
-
-            screenStream = await navigator.mediaDevices.getDisplayMedia({
-                video: true
-            });
-
-            const screenTrack = screenStream.getVideoTracks()[0];
-
-            // replace video track for all peers
-            Object.values(peers).forEach(peer => {
-
-                const sender = peer.getSenders()
-                    .find(s => s.track.kind === "video");
-
-                if (sender) sender.replaceTrack(screenTrack);
-            });
-
-            // change main video locally
-            const mainVideo = document.getElementById("mainVideo");
-mainVideo.srcObject = screenStream;
-
-// screen share should NEVER be mirrored
-mainVideo.classList.remove("local-video");
-
-// update label
-document.getElementById("mainVideoLabel").innerText =
-    `You (${username}) - Screen`;
-
-            isScreenSharing = true;
-
-            socket.emit("screen-share-status", true);
-
-            // hide local camera thumbnail
-const localVideo = document.getElementById("local");
-if (localVideo) localVideo.style.display = "none";
-
-            // when user clicks "Stop sharing"
-            screenTrack.onended = () => {
-                stopScreenShare();
-            };
-
-        }
-
-        // ===== STOP SCREEN SHARE =====
-        else {
-            stopScreenShare();
-        }
-
-    } catch (err) {
-        console.log("Screen share error:", err);
-    }
-}
-
-function stopScreenShare() {
-
-    const cameraTrack = localStream.getVideoTracks()[0];
-
-    Object.values(peers).forEach(peer => {
-
-        const sender = peer.getSenders()
-            .find(s => s.track.kind === "video");
-
-        if (sender) sender.replaceTrack(cameraTrack);
-    });
-
-    const mainVideo = document.getElementById("mainVideo");
-mainVideo.srcObject = localStream;
-
-// restore mirror for local camera
-mainVideo.classList.add("local-video");
-
-document.getElementById("mainVideoLabel").innerText =
-    `You (${username})`;
-
-const localVideo = document.getElementById("local");
-if (localVideo) localVideo.style.display = "block";
-
-    if (screenStream) {
-        screenStream.getTracks().forEach(t => t.stop());
-    }
-
-    isScreenSharing = false;
-    socket.emit("screen-share-status", false);
-}
-
-function switchToGroupChat() {
-    privateChatUserId = null;
-    privateChatUserName = null;
-
-    document.getElementById("chatTitle").innerText = "Chat";
-document.getElementById("backToGroupBtn").style.display = "none";
-loadChatMessages();
-}
-
-function updateParticipantNotification(userId) {
-
-    const item = document.querySelector(
-        `[data-user="${userId}"]`
-    );
-
-    if (!item) return;
-
-    let badge = item.querySelector(".msg-badge");
-    const count = unreadPrivateMessages[userId] || 0;
-
-    // REMOVE badge if no unread messages
-    if (count === 0) {
-        if (badge) badge.remove();
-        return;
-    }
-
-    // CREATE badge if needed
-    if (!badge) {
-        badge = document.createElement("span");
-        badge.className = "msg-badge";
-        item.appendChild(badge);
-    }
-
-    badge.innerText = count;
-}
-
-function loadChatMessages() {
-
-    const messages = document.getElementById("messages");
-    messages.innerHTML = "";
-
-    // GROUP CHAT
-    if (!privateChatUserId) {
-        chatHistory.group.forEach(m =>
-            addMessage(m.sender, m.message)
-        );
-        return;
-    }
-
-    // PRIVATE CHAT
-    const history = chatHistory.private[privateChatUserId] || [];
-
-    history.forEach(m =>
-        addMessage(m.sender, m.message)
-    );
-    document.getElementById("chat-message").focus();
 }
