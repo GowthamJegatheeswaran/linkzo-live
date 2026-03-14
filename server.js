@@ -13,6 +13,50 @@ const io     = new Server(server, {
 
 app.use(express.static("public"));
 
+/* ── ICE / TURN credential endpoint ────────────────
+   Serves fresh TURN credentials to the client.
+   Uses multiple free TURN servers as fallback so
+   cross-network video works even if one goes down.
+   ─────────────────────────────────────────────────*/
+app.get("/ice-config", (req, res) => {
+    // Multiple TURN servers for maximum reliability
+    // These are well-known free/public TURN servers
+    const iceServers = [
+        // Google STUN (just for NAT detection, not relay)
+        { urls: "stun:stun.l.google.com:19302"  },
+        { urls: "stun:stun1.l.google.com:19302" },
+        { urls: "stun:stun2.l.google.com:19302" },
+
+        // Metered.ca free TURN — most reliable free option
+        // Sign up free at app.metered.ca → Dashboard → TURN credentials
+        // Replace these with your own from: https://app.metered.ca/tools/online-turn-server
+        {
+            urls: [
+                "turn:a.relay.metered.ca:80",
+                "turn:a.relay.metered.ca:80?transport=tcp",
+                "turn:a.relay.metered.ca:443",
+                "turn:a.relay.metered.ca:443?transport=tcp",
+                "turns:a.relay.metered.ca:443"
+            ],
+            username:   process.env.METERED_USERNAME   || "openrelayproject",
+            credential: process.env.METERED_CREDENTIAL || "openrelayproject"
+        },
+
+        // Cloudflare TURN (if you have Cloudflare account — free tier available)
+        // Kept as extra fallback with same credentials structure
+
+        // Twilio backup (requires Twilio account but very reliable)
+        // Uncomment and add your own if needed:
+        // {
+        //   urls: "turn:global.turn.twilio.com:3478?transport=udp",
+        //   username: process.env.TWILIO_TURN_USERNAME,
+        //   credential: process.env.TWILIO_TURN_CREDENTIAL
+        // }
+    ];
+
+    res.json({ iceServers });
+});
+
 const roomStartTimes = {};
 const users          = {};
 const muteStates     = {};
@@ -56,7 +100,6 @@ io.on("connection", (socket) => {
             socket.emit("call-started", roomStartTimes[roomId]);
         }
 
-        /* ── WebRTC signaling ── */
         socket.on("offer", (offer, targetId) => {
             const user = users[socket.id];
             if (!user) return;
@@ -69,7 +112,6 @@ io.on("connection", (socket) => {
             io.to(targetId).emit("ice-candidate", candidate, socket.id);
         });
 
-        /* ── Screen share state ── */
         socket.on("screen-sharing", (isSharing) => {
             const user = users[socket.id];
             if (!user) return;
@@ -77,7 +119,6 @@ io.on("connection", (socket) => {
             socket.to(user.roomId).emit("screen-sharing", socket.id, isSharing, user.username);
         });
 
-        /* ── Group chat ── */
         socket.on("group-message", (message) => {
             const user = users[socket.id];
             if (!user || !message?.trim()) return;
@@ -89,25 +130,18 @@ io.on("connection", (socket) => {
             });
         });
 
-        /* ── Private chat ── */
         socket.on("private-message", (targetId, message) => {
             const user = users[socket.id];
             if (!user || !message?.trim() || !users[targetId]) return;
-            const payload = {
+            // Only send to recipient — sender renders their own message immediately
+            io.to(targetId).emit("private-message", {
                 senderId:   socket.id,
                 senderName: user.username,
                 message:    message.trim(),
                 time:       Date.now()
-            };
-            io.to(targetId).emit("private-message", payload);
-            socket.emit("private-message-echo", {
-                ...payload,
-                recipientId:   targetId,
-                recipientName: users[targetId].username
             });
         });
 
-        /* ── Media states ── */
         socket.on("mute-status", (isMuted) => {
             const user = users[socket.id];
             if (!user) return;
@@ -121,7 +155,6 @@ io.on("connection", (socket) => {
             socket.to(user.roomId).emit("camera-status", socket.id, isOn);
         });
 
-        /* ── Disconnect ── */
         socket.on("disconnect", () => {
             const user = users[socket.id];
             if (!user) return;

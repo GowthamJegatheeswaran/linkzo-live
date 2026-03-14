@@ -36,31 +36,43 @@ let dmUnread          = {};      // peerId → unread count (per-user, like What
 let panelOpen         = false;   // starts CLOSED — opens when user taps Chat/People
 
 /* ── ICE config ── */
-const RTC_CONFIG = {
+// RTC config is fetched from server at startup (see initRTCConfig)
+// This allows TURN credentials to be set via environment variables on Railway
+let RTC_CONFIG = {
     iceServers: [
-        { urls: "stun:stun.l.google.com:19302"  },
-        { urls: "stun:stun1.l.google.com:19302" },
-        { urls: "stun:stun2.l.google.com:19302" },
-        { urls: "stun:stun3.l.google.com:19302" },
-        {
-            urls: [
-                "turn:openrelay.metered.ca:80",
-                "turn:openrelay.metered.ca:443",
-                "turns:openrelay.metered.ca:443"
-            ],
-            username:   "openrelayproject",
-            credential: "openrelayproject"
-        }
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" }
     ],
     iceTransportPolicy: "all",
     bundlePolicy: "max-bundle",
     rtcpMuxPolicy: "require"
 };
 
+async function initRTCConfig() {
+    try {
+        const res = await fetch("/ice-config");
+        const data = await res.json();
+        if (data.iceServers && data.iceServers.length > 0) {
+            RTC_CONFIG = {
+                iceServers: data.iceServers,
+                iceTransportPolicy: "all",
+                bundlePolicy: "max-bundle",
+                rtcpMuxPolicy: "require"
+            };
+            console.log("[ICE] Config loaded:", data.iceServers.length, "servers");
+        }
+    } catch(e) {
+        console.warn("[ICE] Could not fetch config, using fallback STUN only:", e);
+    }
+}
+
 /* ══════════════════════════════════════════════════
    INIT
    ══════════════════════════════════════════════════ */
 async function init() {
+    // Fetch TURN credentials from server before creating any peer connections
+    await initRTCConfig();
+
     try {
         localStream = await navigator.mediaDevices.getUserMedia({
             video: { width:{ideal:1280}, height:{ideal:720}, facingMode:"user" },
@@ -251,7 +263,28 @@ function createPeer(userId) {
     };
 
     peer.onconnectionstatechange = () => {
-        if (peer.connectionState === "failed" && socket.id < userId) peer.restartIce();
+        const state = peer.connectionState;
+        console.log(`[${userId.substring(0,8)}] connection: ${state}`);
+        if (state === "failed") {
+            // Try ICE restart first
+            if (socket.id < userId) {
+                console.log("[ICE] Attempting restart...");
+                peer.restartIce();
+            }
+        }
+        if (state === "disconnected") {
+            // Give it 3 seconds then try reconnecting
+            setTimeout(() => {
+                if (peers[userId]?.connectionState === "disconnected") {
+                    console.log("[ICE] Disconnected, attempting reconnect...");
+                    if (socket.id < userId) connectToUser(userId);
+                }
+            }, 3000);
+        }
+    };
+
+    peer.oniceconnectionstatechange = () => {
+        console.log(`[${userId.substring(0,8)}] ICE: ${peer.iceConnectionState}`);
     };
 
     peers[userId] = peer;
