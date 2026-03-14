@@ -224,14 +224,9 @@ socket.on("private-message", (payload) => {
     }
 });
 
-socket.on("private-message-echo", (payload) => {
-    const rid = payload.recipientId;
-    if (!dmHistory[rid]) dmHistory[rid] = [];
-    dmHistory[rid].push({ ...payload, isMe: true });
-    if (activeDMId === rid && activeTab === "private" && panelOpen) {
-        appendDMMsg({ ...payload, senderName: "You" }, true);
-    }
-});
+// private-message-echo intentionally removed:
+// sendPrivateMessage() already renders + stores the sent message immediately.
+// The server echo would cause double rendering.
 
 /* ══════════════════════════════════════════════════
    PEER CONNECTIONS
@@ -802,12 +797,9 @@ function bindInputs() {
 
     if (gi) {
         gi.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); sendGroupMessage(); } });
-        /* mobile "Go" / "Send" button fires this */
-        gi.addEventListener("change", () => { if (gi.value.trim()) sendGroupMessage(); });
     }
     if (di) {
         di.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); sendPrivateMessage(); } });
-        di.addEventListener("change", () => { if (di.value.trim()) sendPrivateMessage(); });
     }
 }
 
