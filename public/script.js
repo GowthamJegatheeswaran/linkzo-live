@@ -32,6 +32,7 @@ let activeDMId        = null;
 let dmHistory         = {};
 let groupUnread       = 0;
 let privateUnread     = 0;
+let dmUnread          = {};      // peerId → unread count (per-user, like WhatsApp)
 let panelOpen         = false;   // starts CLOSED — opens when user taps Chat/People
 
 /* ── ICE config ── */
@@ -211,11 +212,15 @@ socket.on("private-message", (payload) => {
     if (!dmHistory[sid]) dmHistory[sid] = [];
     dmHistory[sid].push({ ...payload, isMe: false });
     if (activeDMId === sid && activeTab === "private" && panelOpen) {
+        // Currently viewing this conversation — mark as read immediately
         appendDMMsg(payload, false);
     } else {
+        // Not viewing — increment per-user AND total unread
+        dmUnread[sid] = (dmUnread[sid] || 0) + 1;
         privateUnread++;
         updateBadges();
-        showToast(`\uD83D\uDCAC ${payload.senderName}: ${payload.message.substring(0, 45)}`, "dm");
+        refreshDMList();   // re-render DM list so badge shows on the right person
+        showToast(`💬 ${payload.senderName}: ${payload.message.substring(0, 45)}`, "dm");
     }
 });
 
@@ -279,6 +284,12 @@ function closePeer(userId) {
     delete userNames[userId];
     delete muteState[userId];
     delete camState[userId];
+    // Clean up any pending unread for this user
+    if (dmUnread[userId]) {
+        privateUnread = Math.max(0, privateUnread - dmUnread[userId]);
+        delete dmUnread[userId];
+        updateBadges();
+    }
     document.getElementById("container-" + userId)?.remove();
 
     // Revert main video to local if needed
@@ -543,7 +554,7 @@ function switchTab(tab) {
     document.getElementById("pane-" + tab)?.classList.add("active");
 
     if (tab === "group")   { groupUnread   = 0; updateBadges(); scrollBottom("group-messages"); }
-    if (tab === "private") { privateUnread = 0; updateBadges(); }
+    if (tab === "private") { /* per-user badges clear when you open each DM — don't clear all here */ updateBadges(); }
     if (tab === "participants") renderParticipants();
 }
 
@@ -618,17 +629,27 @@ function refreshDMList() {
         return;
     }
     ids.forEach(id => {
-        const name = userNames[id];
+        const name    = userNames[id];
+        const unread  = dmUnread[id] || 0;
+        const hist    = dmHistory[id] || [];
+        const lastMsg = hist.length ? hist[hist.length - 1] : null;
+        const preview = lastMsg
+            ? (lastMsg.isMe ? "You: " + lastMsg.message : lastMsg.message)
+            : "Tap to chat privately";
+
         const item = document.createElement("div");
-        item.className = "dm-item";
+        item.className = "dm-item" + (unread > 0 ? " dm-item-unread" : "");
         item.onclick   = () => openDM(id);
         item.innerHTML = `
           <div class="dm-av" style="background:${avatarColor(name)}">${getInitials(name)}</div>
           <div class="dm-info">
-            <div class="dm-name">${esc(name)}</div>
-            <div class="dm-hint">Tap to chat privately</div>
+            <div class="dm-name-row">
+              <span class="dm-name">${esc(name)}</span>
+              ${lastMsg ? `<span class="dm-time">${fmtTime(lastMsg.time)}</span>` : ""}
+            </div>
+            <div class="dm-preview ${unread > 0 ? "dm-preview-bold" : ""}">${esc(preview.substring(0, 35))}${preview.length > 35 ? "\u2026" : ""}</div>
           </div>
-          <i class="fa-solid fa-chevron-right dm-arrow"></i>`;
+          ${unread > 0 ? `<span class="dm-badge">${unread > 99 ? "99+" : unread}</span>` : '<i class="fa-solid fa-chevron-right dm-arrow"></i>'}`;
         list.appendChild(item);
     });
 }
@@ -655,8 +676,12 @@ function openDM(userId) {
     scrollBottom("dm-messages");
     document.getElementById("dm-input")?.focus();
     switchTab("private");
-    privateUnread = 0;
+    // Clear this user's unread count — like WhatsApp marking as read
+    const wasUnread = dmUnread[userId] || 0;
+    dmUnread[userId] = 0;
+    privateUnread = Math.max(0, privateUnread - wasUnread);
     updateBadges();
+    refreshDMList();   // re-render list to remove badge from this user
 }
 
 function closeDM() {
