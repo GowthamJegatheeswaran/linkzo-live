@@ -13,23 +13,28 @@ const io     = new Server(server, {
 
 app.use(express.static("public"));
 
-/* ── ICE / TURN credential endpoint ────────────────
-   Serves fresh TURN credentials to the client.
-   Uses multiple free TURN servers as fallback so
-   cross-network video works even if one goes down.
-   ─────────────────────────────────────────────────*/
+/* ── ICE / TURN endpoint ─────────────────────────────
+   Multiple TURN servers from different providers.
+   WebRTC tries ALL of them simultaneously and uses
+   whichever responds first — so if one quota runs out
+   or goes down, the others automatically take over.
+   ─────────────────────────────────────────────────── */
 app.get("/ice-config", (req, res) => {
-    // Multiple TURN servers for maximum reliability
-    // These are well-known free/public TURN servers
-    const iceServers = [
-        // Google STUN (just for NAT detection, not relay)
-        { urls: "stun:stun.l.google.com:19302"  },
-        { urls: "stun:stun1.l.google.com:19302" },
-        { urls: "stun:stun2.l.google.com:19302" },
 
-        // Metered.ca free TURN — most reliable free option
-        // Sign up free at app.metered.ca → Dashboard → TURN credentials
-        // Replace these with your own from: https://app.metered.ca/tools/online-turn-server
+    const iceServers = [
+
+        // ── STUN servers (free, no quota, just for NAT detection) ──
+        { urls: "stun:stun.l.google.com:19302"       },
+        { urls: "stun:stun1.l.google.com:19302"      },
+        { urls: "stun:stun2.l.google.com:19302"      },
+        { urls: "stun:stun3.l.google.com:19302"      },
+        { urls: "stun:stun4.l.google.com:19302"      },
+        { urls: "stun:stun.cloudflare.com:3478"      },
+        { urls: "stun:stun.stunprotocol.org:3478"    },
+        { urls: "stun:stun.voip.blackberry.com:3478" },
+
+        // ── TURN #1 — Metered.ca (your account, env vars) ──
+        // 500MB free/month — primary relay
         {
             urls: [
                 "turn:a.relay.metered.ca:80",
@@ -38,23 +43,69 @@ app.get("/ice-config", (req, res) => {
                 "turn:a.relay.metered.ca:443?transport=tcp",
                 "turns:a.relay.metered.ca:443"
             ],
-            username:   process.env.METERED_USERNAME   || "openrelayproject",
-            credential: process.env.METERED_CREDENTIAL || "openrelayproject"
+            username:   process.env.METERED_USERNAME   || "",
+            credential: process.env.METERED_CREDENTIAL || ""
         },
 
-        // Cloudflare TURN (if you have Cloudflare account — free tier available)
-        // Kept as extra fallback with same credentials structure
+        // ── TURN #2 — Metered.ca second credential (env vars) ──
+        // Add METERED_USERNAME2 / METERED_CREDENTIAL2 in Railway
+        // for a second 500MB pool — doubles your relay capacity
+        ...(process.env.METERED_USERNAME2 ? [{
+            urls: [
+                "turn:a.relay.metered.ca:80",
+                "turn:a.relay.metered.ca:443",
+                "turns:a.relay.metered.ca:443"
+            ],
+            username:   process.env.METERED_USERNAME2,
+            credential: process.env.METERED_CREDENTIAL2 || ""
+        }] : []),
 
-        // Twilio backup (requires Twilio account but very reliable)
-        // Uncomment and add your own if needed:
-        // {
-        //   urls: "turn:global.turn.twilio.com:3478?transport=udp",
-        //   username: process.env.TWILIO_TURN_USERNAME,
-        //   credential: process.env.TWILIO_TURN_CREDENTIAL
-        // }
+        // ── TURN #3 — Open Relay Project (free, no signup) ──
+        // Less reliable but zero quota — good emergency fallback
+        {
+            urls: [
+                "turn:openrelay.metered.ca:80",
+                "turn:openrelay.metered.ca:80?transport=tcp",
+                "turn:openrelay.metered.ca:443",
+                "turns:openrelay.metered.ca:443"
+            ],
+            username:   "openrelayproject",
+            credential: "openrelayproject"
+        },
+
+        // ── TURN #4 — Numb (free public TURN, no signup) ──
+        {
+            urls: [
+                "turn:numb.viagenie.ca:3478",
+                "turn:numb.viagenie.ca:3478?transport=tcp"
+            ],
+            username:   "webrtc@live.com",
+            credential: "muazkh"
+        },
+
+        // ── TURN #5 — Xirsys free tier (very reliable) ──
+        // Add XIRSYS_USERNAME / XIRSYS_CREDENTIAL in Railway
+        // after signing up free at xirsys.com
+        ...(process.env.XIRSYS_USERNAME ? [{
+            urls: [
+                "turn:ss.xirsys.com:80?transport=udp",
+                "turn:ss.xirsys.com:3478?transport=udp",
+                "turn:ss.xirsys.com:443?transport=tcp",
+                "turns:ss.xirsys.com:443?transport=tcp"
+            ],
+            username:   process.env.XIRSYS_USERNAME,
+            credential: process.env.XIRSYS_CREDENTIAL || ""
+        }] : []),
     ];
 
-    res.json({ iceServers });
+    // Filter out TURN entries with empty credentials
+    const filtered = iceServers.filter(s => {
+        if (!s.username && !s.credential) return true; // STUN — keep always
+        if (s.username === "") return false;            // empty cred — skip
+        return true;
+    });
+
+    res.json({ iceServers: filtered });
 });
 
 const roomStartTimes = {};
@@ -133,7 +184,6 @@ io.on("connection", (socket) => {
         socket.on("private-message", (targetId, message) => {
             const user = users[socket.id];
             if (!user || !message?.trim() || !users[targetId]) return;
-            // Only send to recipient — sender renders their own message immediately
             io.to(targetId).emit("private-message", {
                 senderId:   socket.id,
                 senderName: user.username,
